@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { COPY } from "./copy";
 import { loadOrbits, type OrbitData } from "./data";
 import { PanZoom } from "./panZoom";
+import { colorTable } from "./colors";
+import { bodyOrbits } from "./planets";
 import { Player } from "./Player";
 import { OrbitRenderer } from "./renderer";
 import { dateAt, daysAt, DEFAULT_SPEED_INDEX, SPEEDS } from "./time";
@@ -41,7 +43,9 @@ function Visualization({ data }: { data: OrbitData }) {
     const canvas = canvasRef.current!;
     let renderer: OrbitRenderer;
     try {
-      renderer = new OrbitRenderer(canvas, data, COPY.errors);
+      const { families } = data.meta;
+      const bodies = bodyOrbits(daysRef.current, referenceJd, families.length);
+      renderer = new OrbitRenderer(canvas, data, bodies, colorTable(families), COPY.errors);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       return;

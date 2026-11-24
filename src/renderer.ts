@@ -1,4 +1,5 @@
 import { FLOATS_PER_ORBIT, type OrbitData } from "./data";
+import { PLANETS } from "./planets";
 
 /** The view: `x` and `y` are the plot position at the screen's center, `zoom` 1 shows the whole plot. */
 export interface Camera {
@@ -23,18 +24,22 @@ interface Program {
 
 interface Resources {
   points: Program;
-  trails: Program;
+  strips: Program;
   downsample: Program;
   blur: Program;
   composite: Program;
-  pointsVao: WebGLVertexArrayObject;
-  trailsVao: WebGLVertexArrayObject;
+  asteroidPoints: WebGLVertexArrayObject;
+  asteroidStrips: WebGLVertexArrayObject;
+  /** The planets, then the Sun. */
+  bodyPoints: WebGLVertexArrayObject;
+  bodyStrips: WebGLVertexArrayObject;
   emptyVao: WebGLVertexArrayObject;
 }
 
 interface Targets {
   density: Target;
   trails: Target;
+  rings: Target;
   nearA: Target;
   nearB: Target;
   farA: Target;
@@ -49,7 +54,16 @@ export const SCALE_EDGE_AU = 60;
 /** Share of half the screen's shorter side that the plot's edge reaches at zoom 1. */
 export const PLOT_FILL = 0.96;
 
-// ---- Points ------------------------------------------------------------------------
+// ---- Colors ------------------------------------------------------------------------
+// Body colors themselves are set in colors.ts. The GPU's color table holds up to this many.
+const MAX_COLORS = 32;
+// Points run through a ramp: black, a dark shade at this share of the hue, the hue
+// itself at half brightness, then tints this far toward white at the brightest.
+const DARK_SHADE = 0.5;
+const LIGHT_TINT = 0.45;
+const PEAK_TINT = 0.85;
+
+// ---- Asteroid points ---------------------------------------------------------------
 // Width in CSS pixels of the smallest asteroid (MIN_DIAMETER_KM).
 const POINT_SIZE = 1.4;
 // Width grows with the log of diameter: this many CSS pixels per tenfold increase.
@@ -64,48 +78,89 @@ const LIGHT_SPREAD = 1.35;
 const EDGE_SOFTNESS = 0.7;
 // Points turn from squares to circles as they grow between these widths in device pixels.
 const ROUND_POINT_SIZES = [3, 5];
-// Brightness one point adds to the density buffer.
-const POINT_WEIGHT = 0.32;
+// Brightness one point adds to the density buffer: higher reads as more opaque.
+const POINT_WEIGHT = 0.8;
 export const MAX_ZOOM = 64;
 // Points grow with zoom, reaching this multiple of their size at the closest zoom.
 const MAX_ZOOM_GROWTH = 3;
 // Added to a point's brightness for each doubling of zoom.
-const ZOOM_BRIGHTNESS = 0.35;
+const ZOOM_BRIGHTNESS = 0.25;
 const MAX_PIXEL_RATIO = 2;
 
 // ---- Trails ------------------------------------------------------------------------
-/** How far back in time each trail reaches, in days. */
-export const TRAIL_DAYS = 60;
+// How far back in time each trail reaches grows with the orbit's size:
+// days = TRAIL_DAYS_AT_BELT * (a / TRAIL_BELT_AU) ^ TRAIL_DAYS_POWER, within the limits.
+// That gives about 10 days at 0.4 AU, 60 at the main belt and two years at 45 AU.
+const TRAIL_DAYS_AT_BELT = 60;
+const TRAIL_BELT_AU = 2.7;
+const TRAIL_DAYS_POWER = 0.9;
+const TRAIL_MIN_DAYS = 10;
+const TRAIL_MAX_DAYS = 730;
 // Vertices along each trail.
 const TRAIL_SAMPLES = 24;
+// A trail's width as a share of its asteroid's width.
+const TRAIL_WIDTH_SHARE = 0.5;
 // Brightness of a trail at its head, before toning.
-const TRAIL_WEIGHT = 0.22;
+const TRAIL_WEIGHT = 0.9;
 // Trails fade toward their tail by their remaining share to this power.
 const TRAIL_FADE_POWER = 1.6;
-// The trail layer's color at full strength: pale and cool.
-const TRAIL_COLOR = "#a9b8cc";
-const TRAIL_STRENGTH = 0.55;
+// How strongly the trail layer shows its colors, from 0 to 1.
+const TRAIL_STRENGTH = 0.8;
+// Each trail starts at the edge of its own point rather than its center, blending in
+// over this many device pixels, so it never shows through the point.
+const TRAIL_EDGE_BLEND = 1;
 
-// ---- Glow and color ----------------------------------------------------------------
+// ---- Planets and the Sun -----------------------------------------------------------
+// The Sun and planets use the asteroids' log size scale, then are scaled up by these
+// factors so they stand out. Their trails are half their boosted width.
+const PLANET_SIZE_BOOST = 1.2;
+const SUN_SIZE_BOOST = 2.2;
+// Planets are drawn see-through with a soft edge like the asteroids, but don't thin
+// their light with size the way large asteroids do. They're dimmer than an asteroid
+// because white reaches full brightness sooner than a colored hue. The Sun is solid.
+// Both feed the glow.
+const PLANET_WEIGHT = 0.45;
+const SUN_WEIGHT = 5;
+// How each kind of point spreads its light with size and softens its edge.
+const ASTEROID_LOOK = { lightSpread: LIGHT_SPREAD, edgeSoftness: EDGE_SOFTNESS };
+const PLANET_LOOK = { lightSpread: 0, edgeSoftness: EDGE_SOFTNESS };
+const SUN_LOOK = { lightSpread: 0, edgeSoftness: 0 };
+// Orbit rings: vertices around each, width in CSS pixels, and gray.
+const RING_SAMPLES = 720;
+const RING_WIDTH = 1;
+const RING_GRAY = 0.22;
+
+// ---- Background --------------------------------------------------------------------
+// A radial gradient centered on the Sun. At the default view it reaches the edge color
+// at the screen's corners; it moves and scales with the plot as you pan and zoom.
+// Bodies are lit on top of it.
+export const BACKGROUND_CENTER = "#2a2c3d";
+export const BACKGROUND_EDGE = "#0f1014";
+
+// ---- Glow --------------------------------------------------------------------------
 const NEAR_GLOW = 0.3;
 const FAR_GLOW = 0.75;
-// Point colors from the sparsest to the densest areas, evenly spaced after black.
-export const GRADIENT = ["#0b2a66", "#2c6cf0", "#7fb4ff", "#eef6ff"];
-// The Sun, drawn on top: its radius in CSS pixels and its glow's reach.
-const SUN_RADIUS = 3.5;
-const SUN_GLOW_RADIUS = 22;
-const SUN_COLOR = "#fff3d6";
 
 const zoomGrowth = (zoom: number) =>
   Math.min(zoom ** (Math.log(MAX_ZOOM_GROWTH) / Math.log(MAX_ZOOM)), MAX_ZOOM_GROWTH);
 
-// Shared by both orbit programs: per-asteroid attributes and the Kepler solve.
+// Shared by both orbit programs: per-body attributes, the Kepler solve, size and color channels.
 const ORBIT_GLSL = `
 layout(location = 0) in vec4 a_frame;   // P.xy, Q.xy: the orbit's axes seen from above
 layout(location = 1) in vec4 a_orbit;   // a (AU), e, mean anomaly at epoch (rad), mean motion (rad/day)
-layout(location = 2) in vec2 a_extra;   // epoch (days from the reference), log10 diameter
+layout(location = 2) in vec3 a_extra;   // epoch (days from the reference), log10 diameter, color index
 uniform vec2 u_scale;
 uniform vec2 u_offset;
+uniform float u_time;
+uniform float u_pointSize;
+uniform float u_decadeSize;
+uniform float u_maxSize;
+// Multiplies every size in a draw: 1 for asteroids, a boost for the planets and Sun.
+uniform float u_sizeScale;
+uniform vec3 u_colors[${MAX_COLORS}];
+// When u_useChannels is 1, every body writes u_channels instead of its color.
+uniform float u_useChannels;
+uniform vec4 u_channels;
 const float TAU = 6.28318530718;
 const float PI = 3.14159265359;
 const float INV_LOG_EDGE = ${(1 / Math.log(1 + SCALE_EDGE_AU / SCALE_R0_AU)).toFixed(8)};
@@ -123,21 +178,32 @@ vec2 plotPosition(float t) {
   vec2 position = orbital.x * a_frame.xy + orbital.y * a_frame.zw;
   float r = max(length(position), 1e-6);
   return position * (log(1.0 + r / R0) * INV_LOG_EDGE / r);
+}
+// Width in device pixels, growing with the log of diameter.
+float pointSize() {
+  float size = u_pointSize + u_decadeSize * max(a_extra.y - ${Math.log10(MIN_DIAMETER_KM).toFixed(5)}, 0.0);
+  return min(size * u_sizeScale, u_maxSize);
+}
+// Brightness times color in rgb, and brightness alone in alpha, so overlapping bodies
+// add up to a mix of their colors weighted by brightness.
+vec4 channels() {
+  if (u_useChannels > 0.5) return u_channels;
+  int index = clamp(int(a_extra.z + 0.5), 0, ${MAX_COLORS - 1});
+  return vec4(u_colors[index], 1.0);
 }`;
 
 const POINT_VERTEX = `#version 300 es
 ${ORBIT_GLSL}
-uniform float u_time;
-uniform float u_pointSize;
-uniform float u_decadeSize;
 uniform float u_lightSize;
-uniform float u_maxSize;
+uniform float u_lightSpread;
 flat out float v_size;
 flat out float v_light;
+flat out vec4 v_channels;
 void main() {
-  float size = min(u_pointSize + u_decadeSize * max(a_extra.y - ${Math.log10(MIN_DIAMETER_KM).toFixed(5)}, 0.0), u_maxSize);
+  float size = pointSize();
   v_size = size;
-  v_light = pow(u_lightSize / size, ${LIGHT_SPREAD.toFixed(3)});
+  v_light = pow(u_lightSize / size, u_lightSpread);
+  v_channels = channels();
   // A pixel wider than the point, so pixels it only partly covers are drawn too.
   gl_PointSize = ceil(size) + 1.0;
   gl_Position = vec4(plotPosition(u_time) * u_scale + u_offset, 0.0, 1.0);
@@ -146,9 +212,11 @@ void main() {
 const POINT_FRAGMENT = `#version 300 es
 precision highp float;
 uniform float u_weight;
+uniform float u_edgeSoftness;
 uniform vec2 u_roundSizes;
 flat in float v_size;
 flat in float v_light;
+flat in vec4 v_channels;
 out vec4 color;
 void main() {
   // This pixel's offset from the point's center, in pixels.
@@ -163,30 +231,85 @@ void main() {
   float roundness = smoothstep(u_roundSizes.x, u_roundSizes.y, v_size);
   // Large circles fade toward their edge.
   float edge = clamp(distance / max(half_size, 1e-3), 0.0, 1.0);
-  float soften = 1.0 - ${EDGE_SOFTNESS.toFixed(3)} * smoothstep(u_roundSizes.y, u_roundSizes.y * 4.0, v_size) * edge * edge;
+  float soften = 1.0 - u_edgeSoftness * smoothstep(u_roundSizes.y, u_roundSizes.y * 4.0, v_size) * edge * edge;
   float coverage = mix(square, circle * soften, roundness);
-  color = vec4(u_weight * coverage * v_light, 0.0, 0.0, 0.0);
+  color = u_weight * coverage * v_light * v_channels;
 }`;
 
-// One line strip per asteroid (an instance), running back in time from its position.
-const TRAIL_VERTEX = `#version 300 es
+// A strip of quads along each body's orbit, one instance per body: trails running back
+// in time from the body, or (with u_spanDays below 0) a whole orbit as a ring. Each
+// vertex is pushed sideways from the orbit by half the strip's width in pixels.
+const STRIP_VERTEX = `#version 300 es
 ${ORBIT_GLSL}
-uniform float u_time;
-uniform float u_trailDays;
+uniform vec2 u_viewport;
+uniform float u_samples;
+// Above 0: trails, with length from the orbit's size. Below 0: a whole orbit, as a ring.
+uniform float u_spanDays;
+uniform float u_fadePower;
+// Width as a share of the body's point size, or a fixed width in device pixels if above 0.
+uniform float u_widthShare;
+uniform float u_fixedWidth;
 out float v_fade;
+out float v_across;
+// Distance in pixels from the body's center along the strip, and the body's radius.
+out float v_headDistance;
+flat out float v_headRadius;
+flat out float v_halfWidth;
+flat out float v_strength;
+flat out vec4 v_channels;
+vec2 toPixels(vec2 plot) {
+  return ((plot * u_scale + u_offset) * 0.5 + 0.5) * u_viewport;
+}
 void main() {
-  float share = float(gl_VertexID) / ${(TRAIL_SAMPLES - 1).toFixed(1)};
-  v_fade = pow(1.0 - share, ${TRAIL_FADE_POWER.toFixed(3)});
-  gl_Position = vec4(plotPosition(u_time - share * u_trailDays) * u_scale + u_offset, 0.0, 1.0);
+  float index = float(gl_VertexID / 2);
+  float side = gl_VertexID % 2 == 0 ? -1.0 : 1.0;
+  float trailDays = clamp(
+    ${TRAIL_DAYS_AT_BELT.toFixed(3)} * pow(a_orbit.x / ${TRAIL_BELT_AU.toFixed(3)}, ${TRAIL_DAYS_POWER.toFixed(3)}),
+    ${TRAIL_MIN_DAYS.toFixed(3)},
+    ${TRAIL_MAX_DAYS.toFixed(3)}
+  );
+  float span = u_spanDays > 0.0 ? trailDays : TAU / a_orbit.w;
+  float spacing = span / (u_samples - 1.0);
+  float share = index / (u_samples - 1.0);
+  float t = u_time - share * span;
+  vec2 here = toPixels(plotPosition(t));
+  vec2 tangent = toPixels(plotPosition(t + spacing * 0.5)) - toPixels(plotPosition(t - spacing * 0.5));
+  float tangentLength = length(tangent);
+  vec2 normal = tangentLength > 1e-5 ? vec2(-tangent.y, tangent.x) / tangentLength : vec2(0.0, 1.0);
+  float width = u_fixedWidth > 0.0 ? u_fixedWidth : pointSize() * u_widthShare;
+  // Strips thinner than a pixel are drawn a pixel wide and dimmed to match.
+  float drawn = max(width, 1.0);
+  v_strength = min(width, 1.0);
+  v_halfWidth = drawn * 0.5;
+  // Half a pixel of margin each side for smooth edges.
+  v_across = side * (v_halfWidth + 0.5);
+  v_fade = u_fadePower > 0.0 ? pow(1.0 - share, u_fadePower) : 1.0;
+  v_headDistance = distance(here, toPixels(plotPosition(u_time)));
+  v_headRadius = pointSize() * 0.5;
+  v_channels = channels();
+  vec2 pixel = here + normal * v_across;
+  gl_Position = vec4(pixel / u_viewport * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
-const TRAIL_FRAGMENT = `#version 300 es
+const STRIP_FRAGMENT = `#version 300 es
 precision highp float;
 uniform float u_weight;
 in float v_fade;
+in float v_across;
+in float v_headDistance;
+flat in float v_headRadius;
+uniform float u_clipHead;
+flat in float v_halfWidth;
+flat in float v_strength;
+flat in vec4 v_channels;
 out vec4 color;
 void main() {
-  color = vec4(u_weight * v_fade, 0.0, 0.0, 0.0);
+  float coverage = clamp(v_halfWidth + 0.5 - abs(v_across), 0.0, 1.0);
+  // Trails start at the edge of their own point.
+  if (u_clipHead > 0.5) {
+    coverage *= smoothstep(v_headRadius - ${(TRAIL_EDGE_BLEND / 2).toFixed(3)}, v_headRadius + ${(TRAIL_EDGE_BLEND / 2).toFixed(3)}, v_headDistance);
+  }
+  color = u_weight * v_fade * v_strength * coverage * v_channels;
 }`;
 
 const FULLSCREEN_VERTEX = `#version 300 es
@@ -198,7 +321,12 @@ void main() {
 }`;
 
 const TONE = `
-float tone(float density) { return 1.0 - exp(-density); }`;
+float tone(float density) { return 1.0 - exp(-density); }
+// Tones the brightness (alpha) and scales the color channels to match.
+vec4 toned(vec4 value) {
+  float light = tone(value.a);
+  return vec4(value.rgb * (light / max(value.a, 1e-6)), light);
+}`;
 
 const DOWNSAMPLE_FRAGMENT = `#version 300 es
 precision highp float;
@@ -208,14 +336,14 @@ uniform vec2 u_texel;
 uniform float u_applyTone;
 out vec4 color;
 ${TONE}
-float read(vec2 offset) {
-  float value = texture(u_source, v_uv + offset * u_texel).r;
-  return mix(value, tone(value), u_applyTone);
+vec4 read(vec2 offset) {
+  vec4 value = texture(u_source, v_uv + offset * u_texel);
+  return mix(value, toned(value), u_applyTone);
 }
 void main() {
-  float sum = read(vec2(-1.0, -1.0)) + read(vec2(1.0, -1.0))
-            + read(vec2(-1.0, 1.0)) + read(vec2(1.0, 1.0));
-  color = vec4(sum * 0.25, 0.0, 0.0, 0.0);
+  vec4 sum = read(vec2(-1.0, -1.0)) + read(vec2(1.0, -1.0))
+           + read(vec2(-1.0, 1.0)) + read(vec2(1.0, 1.0));
+  color = sum * 0.25;
 }`;
 
 const BLUR_FRAGMENT = `#version 300 es
@@ -242,39 +370,53 @@ uniform sampler2D u_density;
 uniform sampler2D u_near;
 uniform sampler2D u_far;
 uniform sampler2D u_trails;
+uniform sampler2D u_rings;
 uniform float u_nearGlow;
 uniform float u_farGlow;
-uniform vec3 u_trailColor;
-uniform vec3 u_sunColor;
-// The Sun's center in device pixels, then its radius and glow radius in device pixels.
-uniform vec2 u_sun;
-uniform vec2 u_sunSize;
+uniform float u_trailStrength;
+uniform vec3 u_ringColor;
+uniform vec3 u_backgroundCenter;
+uniform vec3 u_backgroundEdge;
+// The Sun's position and the gradient's radius, in device pixels.
+uniform vec2 u_backgroundCenterPixel;
+uniform float u_backgroundRadius;
 out vec4 color;
 ${TONE}
-const int STOP_COUNT = ${GRADIENT.length + 1};
-uniform vec3 u_stops[STOP_COUNT];
-vec3 gradient(float value) {
-  float position = clamp(value, 0.0, 1.0) * float(STOP_COUNT - 1);
-  int stop = min(int(position), STOP_COUNT - 2);
-  return mix(u_stops[stop], u_stops[stop + 1], position - float(stop));
+vec3 screen(vec3 a, vec3 b) { return 1.0 - (1.0 - a) * (1.0 - b); }
+// The color of some light: its color channels divided by its brightness.
+vec3 hue(vec4 value) {
+  return clamp(value.rgb / max(value.a, 1e-6), 0.0, 1.0);
 }
 float noise(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 void main() {
-  float core = tone(texture(u_density, v_uv).r);
-  float near = clamp(texture(u_near, v_uv).r * u_nearGlow, 0.0, 1.0);
-  float far = clamp(texture(u_far, v_uv).r * u_farGlow, 0.0, 1.0);
-  float light = 1.0 - (1.0 - core) * (1.0 - near) * (1.0 - far);
+  vec4 core = toned(texture(u_density, v_uv));
+  vec4 near = texture(u_near, v_uv) * u_nearGlow;
+  vec4 far = texture(u_far, v_uv) * u_farGlow;
+  float light = 1.0 - (1.0 - core.a) * (1.0 - clamp(near.a, 0.0, 1.0)) * (1.0 - clamp(far.a, 0.0, 1.0));
   light += (noise(gl_FragCoord.xy) - 0.5) / 255.0;
-  vec3 rgb = gradient(light);
-  // Trails sit under the points as a pale layer that doesn't feed the glow.
-  vec3 trail = u_trailColor * tone(texture(u_trails, v_uv).r);
-  rgb = 1.0 - (1.0 - rgb) * (1.0 - trail);
-  // The Sun: a small disc with a soft halo.
-  float distance = length(gl_FragCoord.xy - u_sun);
-  float disc = clamp(u_sunSize.x + 0.5 - distance, 0.0, 1.0);
-  float halo = 0.35 * exp(-3.0 * distance / u_sunSize.y);
-  rgb = 1.0 - (1.0 - rgb) * (1.0 - u_sunColor * max(disc, halo));
-  color = vec4(rgb, 1.0);
+  vec3 tint = hue(core + near + far);
+  vec3 ramp[5] = vec3[5](
+    vec3(0.0),
+    tint * ${DARK_SHADE.toFixed(3)},
+    tint,
+    mix(tint, vec3(1.0), ${LIGHT_TINT.toFixed(3)}),
+    mix(tint, vec3(1.0), ${PEAK_TINT.toFixed(3)})
+  );
+  float position = clamp(light, 0.0, 1.0) * 4.0;
+  int stop = min(int(position), 3);
+  vec3 points = mix(ramp[stop], ramp[stop + 1], position - float(stop));
+
+  vec4 trails = texture(u_trails, v_uv);
+  vec3 trail = hue(trails) * tone(trails.a) * u_trailStrength;
+  vec3 rgb = u_ringColor * tone(texture(u_rings, v_uv).a);
+  rgb = screen(rgb, trail);
+  rgb = screen(rgb, points);
+
+  // The background: 0 at the Sun, 1 at the gradient's radius, with dithering to avoid banding.
+  float reach = distance(gl_FragCoord.xy, u_backgroundCenterPixel) / u_backgroundRadius;
+  vec3 background = mix(u_backgroundCenter, u_backgroundEdge, clamp(reach, 0.0, 1.0));
+  background += (noise(gl_FragCoord.xy + 17.0) - 0.5) / 255.0;
+  color = vec4(screen(background, rgb), 1.0);
 }`;
 
 function hexChannels(hex: string): number[] {
@@ -292,12 +434,7 @@ function compile(gl: WebGL2RenderingContext, type: number, source: string): WebG
   return shader;
 }
 
-function createProgram(
-  gl: WebGL2RenderingContext,
-  vertex: string,
-  fragment: string,
-  uniformNames: string[],
-): Program {
+function createProgram(gl: WebGL2RenderingContext, vertex: string, fragment: string, uniformNames: string[]): Program {
   const program = gl.createProgram()!;
   gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, vertex));
   gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragment));
@@ -334,11 +471,25 @@ export interface Errors {
   noFloatRendering: string;
 }
 
+const ORBIT_UNIFORMS = [
+  "u_scale",
+  "u_offset",
+  "u_time",
+  "u_pointSize",
+  "u_decadeSize",
+  "u_maxSize",
+  "u_sizeScale",
+  "u_colors",
+  "u_useChannels",
+  "u_channels",
+  "u_weight",
+];
+
 /**
- * Draws every asteroid at a moment in time. Positions are solved on the GPU from
- * each orbit, so moving time or the camera only changes uniforms. Points add into a
- * density buffer that a two-size glow turns into light; trails go into their own
- * buffer and are laid on as a pale layer.
+ * Draws the asteroids, planets and Sun at a moment in time. Positions are solved on
+ * the GPU from each orbit, so moving time or the camera only changes uniforms. Bodies
+ * add their brightness and color into a density buffer that a two-size glow turns
+ * into light. Trails and the planets' orbit rings get buffers of their own.
  */
 export class OrbitRenderer {
   private gl: WebGL2RenderingContext;
@@ -351,13 +502,22 @@ export class OrbitRenderer {
   private time = 0;
   private camera: Camera = { zoom: 1, x: 0, y: 0 };
   private frame = 0;
-  private gradient = new Float32Array(["#000000", ...GRADIENT].flatMap(hexChannels));
+  private colors: Float32Array;
 
+  /**
+   * `bodies` holds the planets' orbits then the Sun's, and `colors` is the color
+   * table that every body's color index points into (see colors.ts).
+   */
   constructor(
     private canvas: HTMLCanvasElement,
     private data: OrbitData,
+    private bodies: Float32Array,
+    colors: string[],
     private errors: Errors,
   ) {
+    if (colors.length > MAX_COLORS) throw new Error(`At most ${MAX_COLORS} colors`);
+    this.colors = new Float32Array(MAX_COLORS * 3);
+    this.colors.set(colors.flatMap(hexChannels));
     const gl = canvas.getContext("webgl2", {
       alpha: false,
       antialias: false,
@@ -422,41 +582,52 @@ export class OrbitRenderer {
     const sizeRange = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) as Float32Array | null;
     this.maxPointSize = sizeRange?.[1] ?? 64;
 
-    const buffer = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, this.data.orbits, gl.STATIC_DRAW);
     const stride = FLOATS_PER_ORBIT * 4;
-    // Points read one orbit per vertex; trails one orbit per instance.
-    const orbitVao = (divisor: number) => {
-      const vao = gl.createVertexArray()!;
-      gl.bindVertexArray(vao);
+    // Points read one orbit per vertex (divisor 0); strips one orbit per instance (divisor 1).
+    const orbitVaos = (orbits: Float32Array) => {
+      const buffer = gl.createBuffer()!;
       gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-      const layout: [number, number, number][] = [
-        [0, 4, 0],
-        [1, 4, 16],
-        [2, 2, 32],
-      ];
-      for (const [location, size, offset] of layout) {
-        gl.enableVertexAttribArray(location);
-        gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
-        gl.vertexAttribDivisor(location, divisor);
-      }
-      gl.bindVertexArray(null);
-      return vao;
+      gl.bufferData(gl.ARRAY_BUFFER, orbits, gl.STATIC_DRAW);
+      const [points, strips] = [0, 1].map((divisor) => {
+        const vao = gl.createVertexArray()!;
+        gl.bindVertexArray(vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        const layout: [number, number, number][] = [
+          [0, 4, 0],
+          [1, 4, 16],
+          [2, 3, 32],
+        ];
+        for (const [location, size, offset] of layout) {
+          gl.enableVertexAttribArray(location);
+          gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
+          gl.vertexAttribDivisor(location, divisor);
+        }
+        gl.bindVertexArray(null);
+        return vao;
+      });
+      return [points!, strips!] as const;
     };
+    const [asteroidPoints, asteroidStrips] = orbitVaos(this.data.orbits);
+    const [bodyPoints, bodyStrips] = orbitVaos(this.bodies);
 
-    const orbitUniforms = ["u_scale", "u_offset", "u_time"];
     this.resources = {
       points: createProgram(gl, POINT_VERTEX, POINT_FRAGMENT, [
-        ...orbitUniforms,
-        "u_pointSize",
-        "u_decadeSize",
+        ...ORBIT_UNIFORMS,
         "u_lightSize",
-        "u_maxSize",
-        "u_weight",
+        "u_lightSpread",
+        "u_edgeSoftness",
         "u_roundSizes",
       ]),
-      trails: createProgram(gl, TRAIL_VERTEX, TRAIL_FRAGMENT, [...orbitUniforms, "u_trailDays", "u_weight"]),
+      strips: createProgram(gl, STRIP_VERTEX, STRIP_FRAGMENT, [
+        ...ORBIT_UNIFORMS,
+        "u_viewport",
+        "u_samples",
+        "u_spanDays",
+        "u_fadePower",
+        "u_widthShare",
+        "u_fixedWidth",
+        "u_clipHead",
+      ]),
       downsample: createProgram(gl, FULLSCREEN_VERTEX, DOWNSAMPLE_FRAGMENT, ["u_source", "u_texel", "u_applyTone"]),
       blur: createProgram(gl, FULLSCREEN_VERTEX, BLUR_FRAGMENT, ["u_source", "u_step"]),
       composite: createProgram(gl, FULLSCREEN_VERTEX, COMPOSITE_FRAGMENT, [
@@ -464,16 +635,20 @@ export class OrbitRenderer {
         "u_near",
         "u_far",
         "u_trails",
+        "u_rings",
         "u_nearGlow",
         "u_farGlow",
-        "u_trailColor",
-        "u_sunColor",
-        "u_sun",
-        "u_sunSize",
-        "u_stops",
+        "u_trailStrength",
+        "u_ringColor",
+        "u_backgroundCenter",
+        "u_backgroundEdge",
+        "u_backgroundCenterPixel",
+        "u_backgroundRadius",
       ]),
-      pointsVao: orbitVao(0),
-      trailsVao: orbitVao(1),
+      asteroidPoints,
+      asteroidStrips,
+      bodyPoints,
+      bodyStrips,
       emptyVao: gl.createVertexArray()!,
     };
   }
@@ -486,6 +661,7 @@ export class OrbitRenderer {
     this.targets = {
       density: createTarget(gl, canvas.width, canvas.height),
       trails: createTarget(gl, canvas.width, canvas.height),
+      rings: createTarget(gl, canvas.width, canvas.height),
       nearA: createTarget(gl, ...size(4)),
       nearB: createTarget(gl, ...size(4)),
       farA: createTarget(gl, ...size(16)),
@@ -510,55 +686,123 @@ export class OrbitRenderer {
     return { scaleX, scaleY, offsetX: -x * scaleX, offsetY: -y * scaleY };
   }
 
+  /** Sets the uniforms both orbit programs share. `channels` overrides the group colors. */
+  private setOrbitUniforms(program: Program, weight: number, sizeScale: number, channels: number[] | null) {
+    const { gl, pixelRatio } = this;
+    const { scaleX, scaleY, offsetX, offsetY } = this.projection();
+    const growth = zoomGrowth(this.camera.zoom);
+    const { uniforms } = program;
+    gl.useProgram(program.program);
+    gl.uniform2f(uniforms.u_scale!, scaleX, scaleY);
+    gl.uniform2f(uniforms.u_offset!, offsetX, offsetY);
+    gl.uniform1f(uniforms.u_time!, this.time);
+    gl.uniform1f(uniforms.u_pointSize!, Math.max(0.5, POINT_SIZE * growth * pixelRatio));
+    gl.uniform1f(uniforms.u_decadeSize!, SIZE_PER_DECADE * growth * pixelRatio);
+    gl.uniform1f(uniforms.u_maxSize!, this.maxPointSize - 1);
+    gl.uniform1f(uniforms.u_sizeScale!, sizeScale);
+    gl.uniform3fv(uniforms.u_colors!, this.colors);
+    gl.uniform1f(uniforms.u_useChannels!, channels ? 1 : 0);
+    const [r, g, b, a] = channels ?? [0, 0, 0, 0];
+    gl.uniform4f(uniforms.u_channels!, r!, g!, b!, a!);
+    gl.uniform1f(uniforms.u_weight!, weight);
+  }
+
+  private drawPoints(
+    vao: WebGLVertexArrayObject,
+    first: number,
+    count: number,
+    weight: number,
+    sizeScale: number,
+    look: { lightSpread: number; edgeSoftness: number },
+    channels: number[] | null,
+  ) {
+    const { gl, resources, pixelRatio } = this;
+    if (!resources) return;
+    const { points } = resources;
+    this.setOrbitUniforms(points, weight, sizeScale, channels);
+    const growth = zoomGrowth(this.camera.zoom);
+    gl.uniform1f(points.uniforms.u_lightSize!, Math.max(0.5, LIGHT_BASE_SIZE * growth * pixelRatio));
+    gl.uniform1f(points.uniforms.u_lightSpread!, look.lightSpread);
+    gl.uniform1f(points.uniforms.u_edgeSoftness!, look.edgeSoftness);
+    gl.uniform2f(points.uniforms.u_roundSizes!, ROUND_POINT_SIZES[0]!, ROUND_POINT_SIZES[1]!);
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.POINTS, first, count);
+  }
+
+  private drawStrips(
+    vao: WebGLVertexArrayObject,
+    count: number,
+    weight: number,
+    sizeScale: number,
+    strip: { samples: number; spanDays: number; fadePower: number; widthShare: number; fixedWidth: number },
+    channels: number[] | null,
+  ) {
+    const { gl, resources } = this;
+    if (!resources) return;
+    const { strips } = resources;
+    this.setOrbitUniforms(strips, weight, sizeScale, channels);
+    gl.uniform1f(strips.uniforms.u_clipHead!, strip.spanDays > 0 ? 1 : 0);
+    const { uniforms } = strips;
+    gl.uniform2f(uniforms.u_viewport!, this.canvas.width, this.canvas.height);
+    gl.uniform1f(uniforms.u_samples!, strip.samples);
+    gl.uniform1f(uniforms.u_spanDays!, strip.spanDays);
+    gl.uniform1f(uniforms.u_fadePower!, strip.fadePower);
+    gl.uniform1f(uniforms.u_widthShare!, strip.widthShare);
+    gl.uniform1f(uniforms.u_fixedWidth!, strip.fixedWidth);
+    gl.bindVertexArray(vao);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, strip.samples * 2, count);
+  }
+
   private draw() {
     const { gl, resources, targets, pixelRatio } = this;
     if (!resources || !targets) return;
-    const { scaleX, scaleY, offsetX, offsetY } = this.projection();
-    const { zoom } = this.camera;
-    const count = this.data.count;
+    // The body buffer holds the planets, then the Sun.
+    const planetCount = PLANETS.length;
 
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0, 0, 0, 0);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);
 
-    // Trails.
+    // Trails, for asteroids and planets alike.
     gl.bindFramebuffer(gl.FRAMEBUFFER, targets.trails.framebuffer);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    const { trails } = resources;
-    gl.useProgram(trails.program);
-    gl.bindVertexArray(resources.trailsVao);
-    gl.uniform2f(trails.uniforms.u_scale!, scaleX, scaleY);
-    gl.uniform2f(trails.uniforms.u_offset!, offsetX, offsetY);
-    gl.uniform1f(trails.uniforms.u_time!, this.time);
-    gl.uniform1f(trails.uniforms.u_trailDays!, TRAIL_DAYS);
-    gl.uniform1f(trails.uniforms.u_weight!, TRAIL_WEIGHT);
-    gl.drawArraysInstanced(gl.LINE_STRIP, 0, TRAIL_SAMPLES, count);
+    const trail = {
+      samples: TRAIL_SAMPLES,
+      spanDays: 1,
+      fadePower: TRAIL_FADE_POWER,
+      widthShare: TRAIL_WIDTH_SHARE,
+      fixedWidth: 0,
+    };
+    this.drawStrips(resources.asteroidStrips, this.data.count, TRAIL_WEIGHT, 1, trail, null);
+    this.drawStrips(resources.bodyStrips, planetCount, TRAIL_WEIGHT, PLANET_SIZE_BOOST, trail, null);
 
-    // Points.
+    // Points: asteroids, then the planets, then the Sun.
     gl.bindFramebuffer(gl.FRAMEBUFFER, targets.density.framebuffer);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    const { points } = resources;
-    gl.useProgram(points.program);
-    gl.bindVertexArray(resources.pointsVao);
-    const growth = zoomGrowth(zoom);
-    gl.uniform2f(points.uniforms.u_scale!, scaleX, scaleY);
-    gl.uniform2f(points.uniforms.u_offset!, offsetX, offsetY);
-    gl.uniform1f(points.uniforms.u_time!, this.time);
-    gl.uniform1f(points.uniforms.u_pointSize!, Math.max(0.5, POINT_SIZE * growth * pixelRatio));
-    gl.uniform1f(points.uniforms.u_decadeSize!, SIZE_PER_DECADE * growth * pixelRatio);
-    gl.uniform1f(points.uniforms.u_lightSize!, Math.max(0.5, LIGHT_BASE_SIZE * growth * pixelRatio));
-    gl.uniform1f(points.uniforms.u_maxSize!, this.maxPointSize - 1);
-    gl.uniform1f(points.uniforms.u_weight!, POINT_WEIGHT * (1 + ZOOM_BRIGHTNESS * Math.log2(zoom)));
-    gl.uniform2f(points.uniforms.u_roundSizes!, ROUND_POINT_SIZES[0]!, ROUND_POINT_SIZES[1]!);
-    gl.drawArrays(gl.POINTS, 0, count);
+    const zoomBoost = 1 + ZOOM_BRIGHTNESS * Math.log2(this.camera.zoom);
+    this.drawPoints(resources.asteroidPoints, 0, this.data.count, POINT_WEIGHT * zoomBoost, 1, ASTEROID_LOOK, null);
+    this.drawPoints(resources.bodyPoints, 0, planetCount, PLANET_WEIGHT * zoomBoost, PLANET_SIZE_BOOST, PLANET_LOOK, null);
+    this.drawPoints(resources.bodyPoints, planetCount, 1, SUN_WEIGHT, SUN_SIZE_BOOST, SUN_LOOK, null);
+
+    // The planets' orbit rings.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, targets.rings.framebuffer);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    this.drawStrips(
+      resources.bodyStrips,
+      planetCount,
+      1,
+      1,
+      { samples: RING_SAMPLES, spanDays: -1, fadePower: 0, widthShare: 0, fixedWidth: RING_WIDTH * pixelRatio },
+      [1, 1, 1, 1],
+    );
 
     gl.disable(gl.BLEND);
-    this.drawGlow(resources, targets, offsetX, offsetY);
+    this.drawGlow(resources, targets);
   }
 
-  private drawGlow(resources: Resources, targets: Targets, offsetX: number, offsetY: number) {
-    const { gl, pixelRatio } = this;
+  private drawGlow(resources: Resources, targets: Targets) {
+    const { gl } = this;
     const { downsample, blur, composite, emptyVao } = resources;
     gl.bindVertexArray(emptyVao);
     gl.activeTexture(gl.TEXTURE0);
@@ -598,26 +842,25 @@ export class OrbitRenderer {
       ["u_near", targets.nearA],
       ["u_far", targets.farA],
       ["u_trails", targets.trails],
+      ["u_rings", targets.rings],
     ];
     textures.forEach(([name, target], unit) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, target.texture);
       gl.uniform1i(composite.uniforms[name]!, unit);
     });
-    gl.uniform1f(composite.uniforms.u_nearGlow!, NEAR_GLOW);
-    gl.uniform1f(composite.uniforms.u_farGlow!, FAR_GLOW);
-    gl.uniform3fv(composite.uniforms.u_stops!, this.gradient);
-    const trailColor = hexChannels(TRAIL_COLOR).map((channel) => channel * TRAIL_STRENGTH);
-    gl.uniform3f(composite.uniforms.u_trailColor!, trailColor[0]!, trailColor[1]!, trailColor[2]!);
-    const sun = hexChannels(SUN_COLOR);
-    gl.uniform3f(composite.uniforms.u_sunColor!, sun[0]!, sun[1]!, sun[2]!);
-    // The Sun sits at the plot's origin, which is clip position (offsetX, offsetY).
-    gl.uniform2f(
-      composite.uniforms.u_sun!,
-      ((offsetX + 1) / 2) * this.canvas.width,
-      ((offsetY + 1) / 2) * this.canvas.height,
-    );
-    gl.uniform2f(composite.uniforms.u_sunSize!, SUN_RADIUS * pixelRatio, SUN_GLOW_RADIUS * pixelRatio);
+    const { uniforms } = composite;
+    gl.uniform1f(uniforms.u_nearGlow!, NEAR_GLOW);
+    gl.uniform1f(uniforms.u_farGlow!, FAR_GLOW);
+    gl.uniform1f(uniforms.u_trailStrength!, TRAIL_STRENGTH);
+    gl.uniform3f(uniforms.u_ringColor!, RING_GRAY, RING_GRAY, RING_GRAY);
+    gl.uniform3fv(uniforms.u_backgroundCenter!, hexChannels(BACKGROUND_CENTER));
+    gl.uniform3fv(uniforms.u_backgroundEdge!, hexChannels(BACKGROUND_EDGE));
+    // The Sun is the plot's origin, at clip position (offsetX, offsetY).
+    const { offsetX, offsetY } = this.projection();
+    const { width, height } = this.canvas;
+    gl.uniform2f(uniforms.u_backgroundCenterPixel!, ((offsetX + 1) / 2) * width, ((offsetY + 1) / 2) * height);
+    gl.uniform1f(uniforms.u_backgroundRadius!, Math.hypot(width / 2, height / 2) * this.camera.zoom);
     pass(null);
     gl.activeTexture(gl.TEXTURE0);
   }
