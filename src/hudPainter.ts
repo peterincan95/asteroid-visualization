@@ -95,33 +95,20 @@ export class HudPainter {
     const dim = css.getPropertyValue("--hud-dim").trim();
     const faint = css.getPropertyValue("--hud-faint").trim();
     const panel = css.getPropertyValue("--hud-panel").trim();
-    const chamfer = parseFloat(css.getPropertyValue("--hud-chamfer")) || 0;
     const glow = (blur: number, alpha: number) => {
       ctx.shadowColor = withAlpha(hud, alpha);
       ctx.shadowBlur = blur * ratio;
     };
 
     // The outline, then the panel inset 1px inside it.
-    const chamferPath = (left: number, top: number, right: number, bottom: number, cut: number) => {
-      ctx.beginPath();
-      ctx.moveTo(left + cut, top);
-      ctx.lineTo(right - cut, top);
-      ctx.lineTo(right, top + cut);
-      ctx.lineTo(right, bottom - cut);
-      ctx.lineTo(right - cut, bottom);
-      ctx.lineTo(left + cut, bottom);
-      ctx.lineTo(left, bottom - cut);
-      ctx.lineTo(left, top + cut);
-      ctx.closePath();
-    };
     ctx.save();
     glow(10, 0.18);
-    chamferPath(box.left, box.top, box.right, box.bottom, chamfer);
     ctx.fillStyle = dim;
-    ctx.fill();
+    ctx.fillRect(box.left, box.top, box.width, box.height);
     ctx.restore();
     ctx.save();
-    chamferPath(box.left + 1, box.top + 1, box.right - 1, box.bottom - 1, chamfer);
+    ctx.beginPath();
+    ctx.rect(box.left + 1, box.top + 1, box.width - 2, box.height - 2);
     ctx.globalCompositeOperation = "destination-out";
     ctx.fill();
     ctx.globalCompositeOperation = "source-over";
@@ -178,11 +165,21 @@ export class HudPainter {
       if (hasGlow) glow(6, 0.55);
       const spacing = parseFloat(style.letterSpacing) || 0;
       const content = element.textContent ?? "";
+      // With tabular-nums, every digit gets the widest digit's room, centered in it, so
+      // changing numbers don't shift the text.
+      const tabular = style.fontVariantNumeric.includes("tabular-nums");
+      const digitWidth = Math.max(...[..."0123456789"].map((digit) => ctx.measureText(digit).width));
       let x = r.left;
       const y = r.top + r.height / 2;
       for (const character of style.textTransform === "uppercase" ? content.toUpperCase() : content) {
-        ctx.fillText(character, x, y);
-        x += ctx.measureText(character).width + spacing;
+        const width = ctx.measureText(character).width;
+        if (tabular && character >= "0" && character <= "9") {
+          ctx.fillText(character, x + (digitWidth - width) / 2, y);
+          x += digitWidth + spacing;
+        } else {
+          ctx.fillText(character, x, y);
+          x += width + spacing;
+        }
       }
     };
     each(".player-date", (element, r) => text(element, r, true));
