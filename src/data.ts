@@ -4,6 +4,8 @@ export interface Meta {
   fields: string[];
   referenceJd: number;
   families: string[];
+  /** The largest named asteroids, to label: index into the orbits, and name. */
+  labels: { index: number; name: string }[];
 }
 
 /**

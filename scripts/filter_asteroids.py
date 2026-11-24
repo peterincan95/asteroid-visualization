@@ -33,6 +33,8 @@ FIELDS = ["a", "e", "i", "om", "w", "ma", "epoch_days", "D", "family_index"]
 
 # Drop poorly determined orbits (JPL uncertainty parameter, 0 = best, 9 = worst).
 MAX_CONDITION_CODE = 5
+# How many of the largest named asteroids get labels in the app.
+LABEL_COUNT = 50
 
 # Minimum diameter in km per display family. 0 keeps everything that passes
 # the orbit-quality filter.
@@ -122,11 +124,17 @@ def main(src: Path, dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     bin_path = dst / "asteroids.bin"
     out[FIELDS].to_numpy(dtype="<f4").tofile(bin_path)
+    # The largest named asteroids get labels: their index in the binary file and name.
+    named = out.reset_index(drop=True)
+    named = named[named["name"].notna() & (named["name"].astype(str).str.strip() != "")]
+    largest = named.sort_values("D", ascending=False).head(LABEL_COUNT)
+    labels = [{"index": int(index), "name": str(row["name"]).strip()} for index, row in largest.iterrows()]
     meta = {
         "count": len(out),
         "fields": FIELDS,
         "referenceJd": REFERENCE_JD,
         "families": families,
+        "labels": labels,
     }
     with open(dst / "asteroids.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

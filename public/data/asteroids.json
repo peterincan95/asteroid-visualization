@@ -29,5 +29,207 @@
     "Centaur",
     "TNO",
     "Other"
+  ],
+  "labels": [
+    {
+      "index": 9293,
+      "name": "Eris"
+    },
+    {
+      "index": 9295,
+      "name": "Makemake"
+    },
+    {
+      "index": 9292,
+      "name": "Haumea"
+    },
+    {
+      "index": 8778,
+      "name": "Sedna"
+    },
+    {
+      "index": 10505,
+      "name": "Gonggong"
+    },
+    {
+      "index": 8783,
+      "name": "Orcus"
+    },
+    {
+      "index": 7712,
+      "name": "Quaoar"
+    },
+    {
+      "index": 12994,
+      "name": "Chiminigagua"
+    },
+    {
+      "index": 0,
+      "name": "Ceres"
+    },
+    {
+      "index": 7992,
+      "name": "Aya"
+    },
+    {
+      "index": 10574,
+      "name": "G!kun||'homdima"
+    },
+    {
+      "index": 9907,
+      "name": "Varda"
+    },
+    {
+      "index": 5875,
+      "name": "Varuna"
+    },
+    {
+      "index": 6629,
+      "name": "Ixion"
+    },
+    {
+      "index": 11372,
+      "name": "Mani"
+    },
+    {
+      "index": 9459,
+      "name": "Ritona"
+    },
+    {
+      "index": 10331,
+      "name": "Achlys"
+    },
+    {
+      "index": 8001,
+      "name": "Uni"
+    },
+    {
+      "index": 8785,
+      "name": "Goibniu"
+    },
+    {
+      "index": 12498,
+      "name": "Dziewanna"
+    },
+    {
+      "index": 9145,
+      "name": "Salacia"
+    },
+    {
+      "index": 13439,
+      "name": "Geyagugv"
+    },
+    {
+      "index": 9458,
+      "name": "Rumina"
+    },
+    {
+      "index": 5815,
+      "name": "Chaos"
+    },
+    {
+      "index": 3,
+      "name": "Vesta"
+    },
+    {
+      "index": 1,
+      "name": "Pallas"
+    },
+    {
+      "index": 7273,
+      "name": "Huya"
+    },
+    {
+      "index": 8567,
+      "name": "Xewioso"
+    },
+    {
+      "index": 7620,
+      "name": "Lempo"
+    },
+    {
+      "index": 9,
+      "name": "Hygiea"
+    },
+    {
+      "index": 8575,
+      "name": "Sila-Nunam"
+    },
+    {
+      "index": 13039,
+      "name": "Leleakuhonua"
+    },
+    {
+      "index": 12206,
+      "name": "Praamzius"
+    },
+    {
+      "index": 9483,
+      "name": "Altjira"
+    },
+    {
+      "index": 686,
+      "name": "Interamnia"
+    },
+    {
+      "index": 51,
+      "name": "Europa"
+    },
+    {
+      "index": 4590,
+      "name": "Chariklo"
+    },
+    {
+      "index": 8308,
+      "name": "Borasisi"
+    },
+    {
+      "index": 8741,
+      "name": "Teharonhiawako"
+    },
+    {
+      "index": 503,
+      "name": "Davida"
+    },
+    {
+      "index": 30,
+      "name": "Euphrosyne"
+    },
+    {
+      "index": 12480,
+      "name": "|=Kagara"
+    },
+    {
+      "index": 443,
+      "name": "Patientia"
+    },
+    {
+      "index": 86,
+      "name": "Sylvia"
+    },
+    {
+      "index": 2,
+      "name": "Juno"
+    },
+    {
+      "index": 64,
+      "name": "Cybele"
+    },
+    {
+      "index": 87,
+      "name": "Thisbe"
+    },
+    {
+      "index": 14,
+      "name": "Eunomia"
+    },
+    {
+      "index": 612,
+      "name": "Hektor"
+    },
+    {
+      "index": 15,
+      "name": "Psyche"
+    }
   ]
 }
