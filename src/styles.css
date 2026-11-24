@@ -1,5 +1,6 @@
 :root {
-  --background: #000;
+  /* Matches the edge of the plot's background gradient in renderer.ts. */
+  --background: #0f1014;
   --text: #fff;
   --text-muted: #b4b4b4;
   --divider: rgb(255 255 255 / 16%);
