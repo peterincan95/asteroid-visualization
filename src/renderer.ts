@@ -9,6 +9,26 @@ export interface Camera {
   y: number;
 }
 
+/**
+ * Which asteroids to show: inclusive ranges of semimajor axis (AU), log10 diameter (km)
+ * and eccentricity. Planets and the Sun are never filtered.
+ */
+export interface OrbitFilter {
+  a: [number, number];
+  logDiameter: [number, number];
+  e: [number, number];
+}
+
+/** A filter that hides nothing. */
+export const NO_FILTER: OrbitFilter = { a: [-1e9, 1e9], logDiameter: [-1e9, 1e9], e: [-1e9, 1e9] };
+
+/** Whether an orbit (in the GPU layout) passes a filter; mirrors filteredOut() in ORBIT_GLSL. */
+export function passesFilter(orbits: Float32Array, index: number, filter: OrbitFilter) {
+  const o = index * FLOATS_PER_ORBIT;
+  const within = (value: number, [low, high]: [number, number]) => value >= low && value <= high;
+  return within(orbits[o + 4]!, filter.a) && within(orbits[o + 9]!, filter.logDiameter) && within(orbits[o + 5]!, filter.e);
+}
+
 interface Target {
   texture: WebGLTexture;
   framebuffer: WebGLFramebuffer;
@@ -39,8 +59,8 @@ interface Resources {
   bodyPoints: WebGLVertexArrayObject;
   bodyStrips: WebGLVertexArrayObject;
   emptyVao: WebGLVertexArrayObject;
-  /** The painted player (see hudPainter.ts), blended in before the screen effects. */
-  overlay: WebGLTexture;
+  /** Painted UI panels (see hudPainter.ts), blended in before the screen effects. */
+  overlays: WebGLTexture[];
   labels: Program;
   labelVao: WebGLVertexArrayObject;
   labelBuffer: WebGLBuffer;
@@ -187,6 +207,10 @@ const LABEL_UNDERLINE_TAIL = 2;
 const LABEL_COLOR = "#e8f2fa";
 const LABEL_OPACITY = 0.85;
 
+// ---- UI overlays -------------------------------------------------------------------
+// How many painted UI panels can be drawn into the display (the player, the filters).
+export const OVERLAY_COUNT = 2;
+
 // ---- Screen effects ----------------------------------------------------------------
 // Each effect's strength (0 to 1) comes from the effects menu; these set what full
 // strength means.
@@ -256,6 +280,19 @@ uniform vec3 u_colors[${MAX_COLORS}];
 // When u_useChannels is 1, every body writes u_channels instead of its color.
 uniform float u_useChannels;
 uniform vec4 u_channels;
+// When u_useFilter is 1, bodies outside these inclusive ranges aren't drawn.
+uniform float u_useFilter;
+uniform vec2 u_filterA;
+uniform vec2 u_filterLogDiameter;
+uniform vec2 u_filterE;
+bool filteredOut() {
+  if (u_useFilter < 0.5) return false;
+  return a_orbit.x < u_filterA.x || a_orbit.x > u_filterA.y
+      || a_extra.y < u_filterLogDiameter.x || a_extra.y > u_filterLogDiameter.y
+      || a_orbit.y < u_filterE.x || a_orbit.y > u_filterE.y;
+}
+// Where a filtered-out body's vertices go: outside the view, so nothing is drawn.
+const vec4 HIDDEN = vec4(2.0, 2.0, 2.0, 1.0);
 const float TAU = 6.28318530718;
 const float PI = 3.14159265359;
 const float INV_LOG_EDGE = ${(1 / Math.log(1 + SCALE_EDGE_AU / SCALE_R0_AU)).toFixed(8)};
@@ -295,6 +332,11 @@ flat out float v_size;
 flat out float v_light;
 flat out vec4 v_channels;
 void main() {
+  if (filteredOut()) {
+    gl_Position = HIDDEN;
+    gl_PointSize = 0.0;
+    return;
+  }
   float size = pointSize();
   v_size = size;
   v_light = pow(u_lightSize / size, u_lightSpread);
@@ -356,6 +398,10 @@ vec2 toPixels(vec2 plot) {
   return ((plot * u_scale + u_offset) * 0.5 + 0.5) * u_viewport;
 }
 void main() {
+  if (filteredOut()) {
+    gl_Position = HIDDEN;
+    return;
+  }
   float index = float(gl_VertexID / 2);
   float side = gl_VertexID % 2 == 0 ? -1.0 : 1.0;
   float trailDays = clamp(
@@ -639,9 +685,9 @@ in vec2 v_uv;
 uniform sampler2D u_scene;
 uniform sampler2D u_bright;
 uniform sampler2D u_streak;
-// The painted player, and where it sits: left, bottom, width and height as shares of the screen.
-uniform sampler2D u_overlay;
-uniform vec4 u_overlayRect;
+// Painted UI panels, and where each sits: left, bottom, width and height as shares of the
+// screen (zero width when unused).
+${Array.from({ length: OVERLAY_COUNT }, (_, slot) => `uniform sampler2D u_overlay${slot};\nuniform vec4 u_overlayRect${slot};`).join("\n")}
 uniform vec2 u_resolution;
 uniform float u_pixelRatio;
 uniform float u_time;
@@ -667,11 +713,12 @@ float hash(vec2 p) {
   p3 += dot(p3, p3.yzx + 33.33);
   return fract((p3.x + p3.y) * p3.z);
 }
-// The overlay at a screen position, premultiplied; clear outside its rectangle.
-vec4 overlayAt(vec2 uv) {
-  vec2 local = (uv - u_overlayRect.xy) / u_overlayRect.zw;
+// An overlay at a screen position, premultiplied; clear outside its rectangle.
+vec4 overlayAt(sampler2D overlay, vec4 rect, vec2 uv) {
+  if (rect.z <= 0.0) return vec4(0.0);
+  vec2 local = (uv - rect.xy) / rect.zw;
   if (any(lessThan(local, vec2(0.0))) || any(greaterThan(local, vec2(1.0)))) return vec4(0.0);
-  return texture(u_overlay, local);
+  return texture(overlay, local);
 }
 vec3 flare(vec2 uv) {
   vec3 sum = vec3(0.0);
@@ -726,17 +773,20 @@ void main() {
     texture(u_scene, uv).g,
     texture(u_scene, uv - fringe).b
   );
-  // The player, laid over the scene with the same fringes.
-  if (u_overlayRect.z > 0.0) {
-    vec4 overlayRed = overlayAt(uv + fringe);
-    vec4 overlayGreen = overlayAt(uv);
-    vec4 overlayBlue = overlayAt(uv - fringe);
+  // The UI panels, laid over the scene with the same fringes.
+${Array.from(
+  { length: OVERLAY_COUNT },
+  (_, slot) => `  {
+    vec4 overlayRed = overlayAt(u_overlay${slot}, u_overlayRect${slot}, uv + fringe);
+    vec4 overlayGreen = overlayAt(u_overlay${slot}, u_overlayRect${slot}, uv);
+    vec4 overlayBlue = overlayAt(u_overlay${slot}, u_overlayRect${slot}, uv - fringe);
     rgb = vec3(
       rgb.r * (1.0 - overlayRed.a) + overlayRed.r,
       rgb.g * (1.0 - overlayGreen.a) + overlayGreen.g,
       rgb.b * (1.0 - overlayBlue.a) + overlayBlue.b
     );
-  }
+  }`,
+).join("\n")}
 
   if (u_streaks > 0.0) rgb += texture(u_streak, uv).rgb * ${glslColor(STREAK_TINT)} * u_streaks * ${STREAK_GAIN.toFixed(3)};
   if (u_flare > 0.0) rgb += flare(uv) * u_flare;
@@ -827,6 +877,10 @@ const ORBIT_UNIFORMS = [
   "u_useChannels",
   "u_channels",
   "u_weight",
+  "u_useFilter",
+  "u_filterA",
+  "u_filterLogDiameter",
+  "u_filterE",
 ];
 
 /**
@@ -851,9 +905,10 @@ export class OrbitRenderer {
   // Whether bodies, camera or size changed since the scene was last drawn; screen effects
   // alone can redraw from the stored scene.
   private sceneDirty = true;
+  private filter: OrbitFilter = NO_FILTER;
   private atlas: LabelAtlas | null = null;
-  private overlay: { source: HTMLCanvasElement; rect: { x: number; y: number; width: number; height: number } } | null =
-    null;
+  private overlays: ({ source: HTMLCanvasElement; rect: { x: number; y: number; width: number; height: number } } | null)[] =
+    Array.from({ length: OVERLAY_COUNT }, () => null);
 
   /**
    * `bodies` holds the planets' orbits then the Sun's, and `colors` is the color
@@ -924,24 +979,31 @@ export class OrbitRenderer {
   /**
    * Draws a canvas over the scene, before the screen effects, so it looks like part of
    * the display. `rect` is in CSS pixels from the canvas's top left. Call again whenever
-   * the canvas changes.
+   * the canvas changes. Each panel has its own `slot`, below OVERLAY_COUNT.
    */
-  setOverlay(source: HTMLCanvasElement, rect: { x: number; y: number; width: number; height: number }) {
-    this.overlay = { source, rect };
-    this.uploadOverlay(source);
+  setOverlay(slot: number, source: HTMLCanvasElement, rect: { x: number; y: number; width: number; height: number }) {
+    this.overlays[slot] = { source, rect };
+    this.uploadOverlay(slot, source);
     this.requestDraw();
   }
 
-  private uploadOverlay(source: HTMLCanvasElement) {
+  private uploadOverlay(slot: number, source: HTMLCanvasElement) {
     const { gl, resources } = this;
     if (!resources) return;
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, resources.overlay);
+    gl.bindTexture(gl.TEXTURE_2D, resources.overlays[slot]!);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  }
+
+  /** Shows only the asteroids within the filter's ranges. */
+  setFilter(filter: OrbitFilter) {
+    this.filter = filter;
+    this.sceneDirty = true;
+    this.requestDraw();
   }
 
   setEffects(effects: EffectSettings) {
@@ -1074,8 +1136,7 @@ export class OrbitRenderer {
         "u_scene",
         "u_bright",
         "u_streak",
-        "u_overlay",
-        "u_overlayRect",
+        ...Array.from({ length: OVERLAY_COUNT }, (_, slot) => [`u_overlay${slot}`, `u_overlayRect${slot}`]).flat(),
         "u_resolution",
         "u_pixelRatio",
         "u_time",
@@ -1097,14 +1158,17 @@ export class OrbitRenderer {
       bodyPoints,
       bodyStrips,
       emptyVao: gl.createVertexArray()!,
-      overlay: gl.createTexture()!,
+      overlays: Array.from({ length: OVERLAY_COUNT }, () => gl.createTexture()!),
     };
-    gl.bindTexture(gl.TEXTURE_2D, this.resources.overlay);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    if (this.overlay) this.uploadOverlay(this.overlay.source);
+    this.resources.overlays.forEach((texture, slot) => {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const overlay = this.overlays[slot];
+      if (overlay) this.uploadOverlay(slot, overlay.source);
+    });
   }
 
   private createTargets() {
@@ -1150,7 +1214,13 @@ export class OrbitRenderer {
   }
 
   /** Sets the uniforms both orbit programs share. `channels` overrides the group colors. */
-  private setOrbitUniforms(program: Program, weight: number, sizeScale: number, channels: number[] | null) {
+  private setOrbitUniforms(
+    program: Program,
+    weight: number,
+    sizeScale: number,
+    channels: number[] | null,
+    filtered: boolean,
+  ) {
     const { gl, pixelRatio } = this;
     const { scaleX, scaleY, offsetX, offsetY } = this.projection();
     const growth = zoomGrowth(this.camera.zoom);
@@ -1168,6 +1238,11 @@ export class OrbitRenderer {
     const [r, g, b, a] = channels ?? [0, 0, 0, 0];
     gl.uniform4f(uniforms.u_channels!, r!, g!, b!, a!);
     gl.uniform1f(uniforms.u_weight!, weight);
+    const { filter } = this;
+    gl.uniform1f(uniforms.u_useFilter!, filtered ? 1 : 0);
+    gl.uniform2f(uniforms.u_filterA!, filter.a[0], filter.a[1]);
+    gl.uniform2f(uniforms.u_filterLogDiameter!, filter.logDiameter[0], filter.logDiameter[1]);
+    gl.uniform2f(uniforms.u_filterE!, filter.e[0], filter.e[1]);
   }
 
   private drawPoints(
@@ -1182,7 +1257,8 @@ export class OrbitRenderer {
     const { gl, resources, pixelRatio } = this;
     if (!resources) return;
     const { points } = resources;
-    this.setOrbitUniforms(points, weight, sizeScale, channels);
+    // Only the asteroids are filtered.
+    this.setOrbitUniforms(points, weight, sizeScale, channels, vao === resources.asteroidPoints);
     const growth = zoomGrowth(this.camera.zoom);
     gl.uniform1f(points.uniforms.u_lightSize!, Math.max(0.5, LIGHT_BASE_SIZE * growth * pixelRatio));
     gl.uniform1f(points.uniforms.u_lightSpread!, look.lightSpread);
@@ -1203,7 +1279,7 @@ export class OrbitRenderer {
     const { gl, resources } = this;
     if (!resources) return;
     const { strips } = resources;
-    this.setOrbitUniforms(strips, weight, sizeScale, channels);
+    this.setOrbitUniforms(strips, weight, sizeScale, channels, vao === resources.asteroidStrips);
     gl.uniform1f(strips.uniforms.u_clipHead!, strip.spanDays > 0 ? 1 : 0);
     const { uniforms } = strips;
     gl.uniform2f(uniforms.u_viewport!, this.canvas.width, this.canvas.height);
@@ -1419,22 +1495,21 @@ export class OrbitRenderer {
       ["u_streak", targets.streakA],
     ]);
     const { uniforms } = final;
-    gl.activeTexture(gl.TEXTURE3);
-    gl.bindTexture(gl.TEXTURE_2D, resources.overlay);
-    gl.uniform1i(uniforms.u_overlay!, 3);
-    gl.activeTexture(gl.TEXTURE0);
-    const overlayRect = this.overlay?.rect;
-    if (overlayRect) {
+    // Overlays take the texture units after the three bound above.
+    resources.overlays.forEach((texture, slot) => {
+      gl.activeTexture(gl.TEXTURE3 + slot);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1i(uniforms[`u_overlay${slot}`]!, 3 + slot);
+      const rect = this.overlays[slot]?.rect;
       gl.uniform4f(
-        uniforms.u_overlayRect!,
-        overlayRect.x / this.width,
-        1 - (overlayRect.y + overlayRect.height) / this.height,
-        overlayRect.width / this.width,
-        overlayRect.height / this.height,
+        uniforms[`u_overlayRect${slot}`]!,
+        rect ? rect.x / this.width : 0,
+        rect ? 1 - (rect.y + rect.height) / this.height : 0,
+        rect ? rect.width / this.width : 0,
+        rect ? rect.height / this.height : 0,
       );
-    } else {
-      gl.uniform4f(uniforms.u_overlayRect!, 0, 0, 0, 0);
-    }
+    });
+    gl.activeTexture(gl.TEXTURE0);
     const { width, height } = this.canvas;
     gl.uniform2f(uniforms.u_resolution!, width, height);
     gl.uniform1f(uniforms.u_pixelRatio!, pixelRatio);
@@ -1586,6 +1661,7 @@ export class OrbitRenderer {
     ];
     for (const [orbits, index, boost, entryIndex, fade] of labelled) {
       if (fade <= 0) continue;
+      if (orbits === this.data.orbits && !passesFilter(orbits, index, this.filter)) continue;
       alpha = fade;
       const entry = atlas.entries[entryIndex]!;
       const position = toPixels(plotPositionAt(orbits, index, this.time));
