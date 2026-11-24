@@ -1,4 +1,5 @@
 import { FLOATS_PER_ORBIT, type OrbitData } from "./data";
+import { DEFAULT_EFFECTS, effectAmount, type EffectSettings } from "./effects";
 import { PLANETS } from "./planets";
 
 /** The view: `x` and `y` are the plot position at the screen's center, `zoom` 1 shows the whole plot. */
@@ -28,12 +29,18 @@ interface Resources {
   downsample: Program;
   blur: Program;
   composite: Program;
+  bright: Program;
+  streak: Program;
+  persist: Program;
+  final: Program;
   asteroidPoints: WebGLVertexArrayObject;
   asteroidStrips: WebGLVertexArrayObject;
   /** The planets, then the Sun. */
   bodyPoints: WebGLVertexArrayObject;
   bodyStrips: WebGLVertexArrayObject;
   emptyVao: WebGLVertexArrayObject;
+  /** The painted player (see hudPainter.ts), blended in before the screen effects. */
+  overlay: WebGLTexture;
 }
 
 interface Targets {
@@ -44,6 +51,16 @@ interface Targets {
   nearB: Target;
   farA: Target;
   farB: Target;
+  /** The finished scene, before screen effects. */
+  scene: Target;
+  /** Phosphor persistence: last frame and this one, swapped each frame. */
+  historyA: Target;
+  historyB: Target;
+  /** Bright parts of the scene at a quarter size, for flares and streaks. */
+  brightA: Target;
+  brightB: Target;
+  streakA: Target;
+  streakB: Target;
 }
 
 // ---- Distance scale ----------------------------------------------------------------
@@ -85,7 +102,7 @@ export const MAX_ZOOM = 64;
 const MAX_ZOOM_GROWTH = 3;
 // Added to a point's brightness for each doubling of zoom.
 const ZOOM_BRIGHTNESS = 0.25;
-const MAX_PIXEL_RATIO = 2;
+export const MAX_PIXEL_RATIO = 2;
 
 // ---- Trails ------------------------------------------------------------------------
 // How far back in time each trail reaches grows with the orbit's size:
@@ -140,6 +157,55 @@ export const BACKGROUND_EDGE = "#0f1014";
 // ---- Glow --------------------------------------------------------------------------
 const NEAR_GLOW = 0.3;
 const FAR_GLOW = 0.75;
+
+// ---- Screen effects ----------------------------------------------------------------
+// Each effect's strength (0 to 1) comes from the effects menu; these set what full
+// strength means.
+// Light brighter than this (0 to 1) feeds the flares and streaks, fading in up to 1.
+const BRIGHT_THRESHOLD = 0.93;
+// Chromatic aberration: color fringes grow toward the edges, reaching this share of
+// the screen's width at the corners.
+const ABERRATION_MAX = 0.006;
+// Curvature: how far the corners bulge, and the screen's corner radius in CSS pixels.
+const CURVATURE_MAX = 0.15;
+const CORNER_RADIUS = 36;
+// Scanlines: period in CSS pixels and how dark the gaps get.
+const SCANLINE_PERIOD = 3;
+const SCANLINE_DEPTH = 0.55;
+// Vignette: how much the corners darken.
+const VIGNETTE_MAX = 0.85;
+// Grain: noise added to each channel.
+const GRAIN_MAX = 0.08;
+// Anamorphic streaks: horizontal blur passes (steps in quarter-size pixels), each
+// fading by this much per tap, then brightened and tinted.
+const STREAK_STEPS = [1, 4, 16];
+const STREAK_FALLOFF = 0.86;
+const STREAK_GAIN = 6;
+const STREAK_TINT = "#6fa8ff";
+// Lens flare: ghosts mirrored through the screen's center (scale, tint), and a halo ring.
+const FLARE_GHOSTS: [number, string][] = [
+  [-0.55, "#ffb36b"],
+  [-1.3, "#7fd8ff"],
+  [-0.3, "#c48bff"],
+  [0.6, "#9dffb8"],
+];
+const FLARE_GAIN = 1.2;
+const HALO_RADIUS = 0.3;
+const HALO_TINT = "#8fb8ff";
+const HALO_GAIN = 0.8;
+// Sun starburst: six spikes with six shorter ones between, length in Sun radii at full
+// strength, width in CSS pixels.
+const SPIKE_LENGTH = 9;
+const SPIKE_WIDTH = 0.9;
+const STARBURST_GAIN = 0.9;
+const STARBURST_TINT = "#fff1d6";
+// Phosphor persistence: share of last frame's light kept each frame, from weakest to strongest.
+const PERSISTENCE_RANGE = [0.7, 0.96];
+// Phosphor mask: how dark the off color stripes get.
+const MASK_DEPTH = 0.65;
+// Flicker: brightness wobble, and the brightness of the rolling bar.
+const FLICKER_MAX = 0.06;
+const ROLLING_BAR_MAX = 0.08;
 
 const zoomGrowth = (zoom: number) =>
   Math.min(zoom ** (Math.log(MAX_ZOOM_GROWTH) / Math.log(MAX_ZOOM)), MAX_ZOOM_GROWTH);
@@ -419,6 +485,187 @@ void main() {
   color = vec4(screen(background, rgb), 1.0);
 }`;
 
+const glslColor = (hex: string) => `vec3(${hexChannels(hex).map((channel) => channel.toFixed(4)).join(", ")})`;
+
+// A quarter-size copy of the scene's light above the threshold, thresholded per tap so
+// small bright points survive.
+const BRIGHT_FRAGMENT = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_source;
+uniform vec2 u_texel;
+out vec4 color;
+vec3 read(vec2 offset) {
+  vec3 value = texture(u_source, v_uv + offset * u_texel).rgb;
+  float luminance = dot(value, vec3(0.2126, 0.7152, 0.0722));
+  return value * smoothstep(${BRIGHT_THRESHOLD.toFixed(3)}, 1.0, luminance);
+}
+void main() {
+  vec3 sum = read(vec2(-1.0, -1.0)) + read(vec2(1.0, -1.0)) + read(vec2(-1.0, 1.0)) + read(vec2(1.0, 1.0));
+  color = vec4(sum * 0.25, 1.0);
+}`;
+
+// One pass of a long sideways blur that fades away from the center.
+const STREAK_FRAGMENT = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_source;
+uniform vec2 u_step;
+out vec4 color;
+void main() {
+  vec3 sum = texture(u_source, v_uv).rgb;
+  float total = 1.0;
+  for (int tap = 1; tap <= 8; tap += 1) {
+    float weight = pow(${STREAK_FALLOFF.toFixed(3)}, float(tap));
+    sum += (texture(u_source, v_uv + u_step * float(tap)).rgb + texture(u_source, v_uv - u_step * float(tap)).rgb) * weight;
+    total += 2.0 * weight;
+  }
+  color = vec4(sum / total, 1.0);
+}`;
+
+// Keeps the brighter of this frame and the last one, faded.
+const PERSIST_FRAGMENT = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_scene;
+uniform sampler2D u_history;
+uniform float u_decay;
+out vec4 color;
+void main() {
+  color = vec4(max(texture(u_scene, v_uv).rgb, texture(u_history, v_uv).rgb * u_decay), 1.0);
+}`;
+
+// Every screen effect, drawn to the screen.
+const FINAL_FRAGMENT = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_scene;
+uniform sampler2D u_bright;
+uniform sampler2D u_streak;
+// The painted player, and where it sits: left, bottom, width and height as shares of the screen.
+uniform sampler2D u_overlay;
+uniform vec4 u_overlayRect;
+uniform vec2 u_resolution;
+uniform float u_pixelRatio;
+uniform float u_time;
+// The Sun's center and radius, in device pixels.
+uniform vec2 u_sunPixel;
+uniform float u_sunRadius;
+uniform float u_aberration;
+uniform float u_scanlines;
+uniform float u_curvature;
+uniform float u_vignette;
+uniform float u_grain;
+uniform float u_streaks;
+uniform float u_flare;
+uniform float u_starburst;
+uniform float u_mask;
+uniform float u_flicker;
+out vec4 color;
+const float TAU = 6.28318530718;
+const float GHOST_SCALES[${FLARE_GHOSTS.length}] = float[${FLARE_GHOSTS.length}](${FLARE_GHOSTS.map(([scale]) => scale.toFixed(3)).join(", ")});
+const vec3 GHOST_TINTS[${FLARE_GHOSTS.length}] = vec3[${FLARE_GHOSTS.length}](${FLARE_GHOSTS.map(([, tint]) => glslColor(tint)).join(", ")});
+float hash(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+// The overlay at a screen position, premultiplied; clear outside its rectangle.
+vec4 overlayAt(vec2 uv) {
+  vec2 local = (uv - u_overlayRect.xy) / u_overlayRect.zw;
+  if (any(lessThan(local, vec2(0.0))) || any(greaterThan(local, vec2(1.0)))) return vec4(0.0);
+  return texture(u_overlay, local);
+}
+vec3 flare(vec2 uv) {
+  vec3 sum = vec3(0.0);
+  vec2 fromCenter = uv - 0.5;
+  for (int index = 0; index < ${FLARE_GHOSTS.length}; index += 1) {
+    vec2 ghost = 0.5 + fromCenter * GHOST_SCALES[index];
+    float fade = 1.0 - smoothstep(0.2, 0.7, length(ghost - 0.5));
+    sum += texture(u_bright, ghost).rgb * GHOST_TINTS[index] * fade;
+  }
+  // The halo: a ring sampled toward the center, round on screen whatever its shape.
+  vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
+  vec2 toCenter = (0.5 - uv) * aspect;
+  vec2 haloUv = uv + (length(toCenter) > 1e-4 ? normalize(toCenter) : vec2(0.0)) / aspect * ${HALO_RADIUS.toFixed(3)};
+  float haloFade = 1.0 - smoothstep(0.3, 0.7, length(haloUv - 0.5));
+  sum += texture(u_bright, haloUv).rgb * ${glslColor(HALO_TINT)} * ${HALO_GAIN.toFixed(3)} * haloFade;
+  return sum * ${FLARE_GAIN.toFixed(3)};
+}
+vec3 starburst(vec2 pixel) {
+  vec2 offset = pixel - u_sunPixel;
+  float total = 0.0;
+  for (int index = 0; index < 6; index += 1) {
+    // Lines every 30 degrees, starting vertical; every other one is a short, dim spike.
+    float angle = 1.5707963 + float(index) * 0.5235988;
+    bool isMain = index % 2 == 0;
+    vec2 direction = vec2(cos(angle), sin(angle));
+    float along = abs(dot(offset, direction));
+    float across = abs(offset.x * direction.y - offset.y * direction.x);
+    float spikeLength = u_sunRadius * ${SPIKE_LENGTH.toFixed(3)} * (isMain ? 1.0 : 0.45) * (0.4 + 0.6 * u_starburst);
+    float width = u_pixelRatio * ${SPIKE_WIDTH.toFixed(3)} * (1.0 - 0.6 * clamp(along / spikeLength, 0.0, 1.0));
+    total += (isMain ? 1.0 : 0.5) * exp(-3.0 * along / spikeLength) * exp(-across * across / (2.0 * width * width));
+  }
+  // Leave the Sun's own disc alone.
+  total *= smoothstep(0.7, 1.3, length(offset) / u_sunRadius);
+  return ${glslColor(STARBURST_TINT)} * total * u_starburst * ${STARBURST_GAIN.toFixed(3)};
+}
+void main() {
+  // Curvature: the screen bulges, edges bowing out and corners cut off.
+  vec2 centered = v_uv * 2.0 - 1.0;
+  vec2 curved = centered + centered * (centered.yx * centered.yx) * u_curvature * ${CURVATURE_MAX.toFixed(3)};
+  vec2 uv = curved * 0.5 + 0.5;
+  vec2 pixel = uv * u_resolution;
+  vec2 halfSize = u_resolution * 0.5;
+  float radius = u_curvature * ${CORNER_RADIUS.toFixed(1)} * u_pixelRatio;
+  vec2 corner = abs(curved) * halfSize - (halfSize - radius);
+  float outside = length(max(corner, 0.0)) + min(max(corner.x, corner.y), 0.0) - radius;
+  float inside = clamp(0.5 - outside, 0.0, 1.0);
+
+  // Chromatic aberration: red and blue pulled apart, more toward the edges.
+  vec2 fringe = curved * dot(curved, curved) * u_aberration * ${ABERRATION_MAX.toFixed(4)} * 0.5;
+  vec3 rgb = vec3(
+    texture(u_scene, uv + fringe).r,
+    texture(u_scene, uv).g,
+    texture(u_scene, uv - fringe).b
+  );
+  // The player, laid over the scene with the same fringes.
+  if (u_overlayRect.z > 0.0) {
+    vec4 overlayRed = overlayAt(uv + fringe);
+    vec4 overlayGreen = overlayAt(uv);
+    vec4 overlayBlue = overlayAt(uv - fringe);
+    rgb = vec3(
+      rgb.r * (1.0 - overlayRed.a) + overlayRed.r,
+      rgb.g * (1.0 - overlayGreen.a) + overlayGreen.g,
+      rgb.b * (1.0 - overlayBlue.a) + overlayBlue.b
+    );
+  }
+
+  if (u_streaks > 0.0) rgb += texture(u_streak, uv).rgb * ${glslColor(STREAK_TINT)} * u_streaks * ${STREAK_GAIN.toFixed(3)};
+  if (u_flare > 0.0) rgb += flare(uv) * u_flare;
+  if (u_starburst > 0.0) rgb += starburst(pixel);
+
+  // Scanlines, following the curve.
+  float line = 0.5 + 0.5 * cos(TAU * pixel.y / (${SCANLINE_PERIOD.toFixed(2)} * u_pixelRatio));
+  rgb *= mix(1.0, 1.0 - ${SCANLINE_DEPTH.toFixed(3)} * (1.0 - line), u_scanlines) * (1.0 + u_scanlines * ${(SCANLINE_DEPTH * 0.4).toFixed(3)});
+
+  // Phosphor mask: red, green and blue stripes, brightened to keep the overall level.
+  float column = mod(floor(gl_FragCoord.x / max(1.0, floor(u_pixelRatio))), 3.0);
+  vec3 stripe = vec3(column < 0.5, column >= 0.5 && column < 1.5, column >= 1.5);
+  vec3 mask = mix(vec3(1.0 - ${MASK_DEPTH.toFixed(3)}), vec3(1.0), stripe);
+  float maskLevel = 1.0 - ${MASK_DEPTH.toFixed(3)} * 2.0 / 3.0;
+  rgb *= mix(vec3(1.0), mask / maskLevel, u_mask);
+
+  // Flicker and a slow bar rolling up the screen.
+  float wobble = hash(vec2(floor(u_time * 24.0), 7.0));
+  float bar = exp(-pow((fract(v_uv.y - u_time * 0.07) - 0.5) * 7.0, 2.0));
+  rgb *= 1.0 - u_flicker * ${FLICKER_MAX.toFixed(3)} * wobble + u_flicker * ${ROLLING_BAR_MAX.toFixed(3)} * bar;
+
+  rgb *= 1.0 - u_vignette * ${VIGNETTE_MAX.toFixed(3)} * smoothstep(0.3, 2.0, dot(curved, curved));
+  rgb += (hash(gl_FragCoord.xy + fract(u_time * 7.13) * vec2(431.0, 197.0)) - 0.5) * u_grain * ${GRAIN_MAX.toFixed(3)};
+  color = vec4(clamp(rgb, 0.0, 1.0) * inside, 1.0);
+}`;
+
 function hexChannels(hex: string): number[] {
   const value = parseInt(hex.slice(1), 16);
   return [(value >> 16) & 255, (value >> 8) & 255, value & 255].map((channel) => channel / 255);
@@ -503,6 +750,12 @@ export class OrbitRenderer {
   private camera: Camera = { zoom: 1, x: 0, y: 0 };
   private frame = 0;
   private colors: Float32Array;
+  private effects: EffectSettings = DEFAULT_EFFECTS;
+  // Whether bodies, camera or size changed since the scene was last drawn; screen effects
+  // alone can redraw from the stored scene.
+  private sceneDirty = true;
+  private overlay: { source: HTMLCanvasElement; rect: { x: number; y: number; width: number; height: number } } | null =
+    null;
 
   /**
    * `bodies` holds the planets' orbits then the Sun's, and `colors` is the color
@@ -543,6 +796,7 @@ export class OrbitRenderer {
     this.height = height;
     const pixelWidth = Math.max(1, Math.round(width * this.pixelRatio));
     const pixelHeight = Math.max(1, Math.round(height * this.pixelRatio));
+    this.sceneDirty = true;
     if (this.canvas.width !== pixelWidth || this.canvas.height !== pixelHeight || !this.targets) {
       this.canvas.width = pixelWidth;
       this.canvas.height = pixelHeight;
@@ -554,12 +808,52 @@ export class OrbitRenderer {
   /** The moment shown, in days from the data's reference epoch. */
   setTime(days: number) {
     this.time = days;
+    this.sceneDirty = true;
     this.requestDraw();
   }
 
   setCamera(camera: Camera) {
     this.camera = camera;
+    this.sceneDirty = true;
     this.requestDraw();
+  }
+
+  /**
+   * Draws a canvas over the scene, before the screen effects, so it looks like part of
+   * the display. `rect` is in CSS pixels from the canvas's top left. Call again whenever
+   * the canvas changes.
+   */
+  setOverlay(source: HTMLCanvasElement, rect: { x: number; y: number; width: number; height: number }) {
+    this.overlay = { source, rect };
+    this.uploadOverlay(source);
+    this.requestDraw();
+  }
+
+  private uploadOverlay(source: HTMLCanvasElement) {
+    const { gl, resources } = this;
+    if (!resources) return;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, resources.overlay);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  }
+
+  setEffects(effects: EffectSettings) {
+    this.effects = effects;
+    // Flares and streaks are only prepared while on, so turning one on needs a fresh scene.
+    this.sceneDirty = true;
+    this.requestDraw();
+  }
+
+  // Grain, flicker and persistence change every frame, so they keep drawing.
+  private isAnimated() {
+    const { effects } = this;
+    return (
+      effectAmount(effects, "grain") > 0 || effectAmount(effects, "flicker") > 0 || effectAmount(effects, "persistence") > 0
+    );
   }
 
   private onContextLost = (event: Event) => {
@@ -571,6 +865,7 @@ export class OrbitRenderer {
   };
 
   private onContextRestored = () => {
+    this.sceneDirty = true;
     this.createResources();
     this.createTargets();
     this.requestDraw();
@@ -645,12 +940,44 @@ export class OrbitRenderer {
         "u_backgroundCenterPixel",
         "u_backgroundRadius",
       ]),
+      bright: createProgram(gl, FULLSCREEN_VERTEX, BRIGHT_FRAGMENT, ["u_source", "u_texel"]),
+      streak: createProgram(gl, FULLSCREEN_VERTEX, STREAK_FRAGMENT, ["u_source", "u_step"]),
+      persist: createProgram(gl, FULLSCREEN_VERTEX, PERSIST_FRAGMENT, ["u_scene", "u_history", "u_decay"]),
+      final: createProgram(gl, FULLSCREEN_VERTEX, FINAL_FRAGMENT, [
+        "u_scene",
+        "u_bright",
+        "u_streak",
+        "u_overlay",
+        "u_overlayRect",
+        "u_resolution",
+        "u_pixelRatio",
+        "u_time",
+        "u_sunPixel",
+        "u_sunRadius",
+        "u_aberration",
+        "u_scanlines",
+        "u_curvature",
+        "u_vignette",
+        "u_grain",
+        "u_streaks",
+        "u_flare",
+        "u_starburst",
+        "u_mask",
+        "u_flicker",
+      ]),
       asteroidPoints,
       asteroidStrips,
       bodyPoints,
       bodyStrips,
       emptyVao: gl.createVertexArray()!,
+      overlay: gl.createTexture()!,
     };
+    gl.bindTexture(gl.TEXTURE_2D, this.resources.overlay);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    if (this.overlay) this.uploadOverlay(this.overlay.source);
   }
 
   private createTargets() {
@@ -666,7 +993,15 @@ export class OrbitRenderer {
       nearB: createTarget(gl, ...size(4)),
       farA: createTarget(gl, ...size(16)),
       farB: createTarget(gl, ...size(16)),
+      scene: createTarget(gl, canvas.width, canvas.height),
+      historyA: createTarget(gl, canvas.width, canvas.height),
+      historyB: createTarget(gl, canvas.width, canvas.height),
+      brightA: createTarget(gl, ...size(4)),
+      brightB: createTarget(gl, ...size(4)),
+      streakA: createTarget(gl, ...size(4)),
+      streakB: createTarget(gl, ...size(4)),
     };
+    this.sceneDirty = true;
   }
 
   private requestDraw() {
@@ -674,6 +1009,7 @@ export class OrbitRenderer {
     this.frame = requestAnimationFrame(() => {
       this.frame = 0;
       this.draw();
+      if (this.isAnimated()) this.requestDraw();
     });
   }
 
@@ -754,8 +1090,38 @@ export class OrbitRenderer {
   }
 
   private draw() {
-    const { gl, resources, targets, pixelRatio } = this;
+    const { resources, targets } = this;
     if (!resources || !targets) return;
+    if (this.sceneDirty) {
+      this.drawScene(resources, targets);
+      this.drawBright(resources, targets);
+      this.sceneDirty = false;
+    }
+    this.drawEffects(resources, targets);
+  }
+
+  /** Draws a fullscreen pass into a target, or the screen. */
+  private pass(target: Target | null) {
+    const { gl } = this;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target?.framebuffer ?? null);
+    gl.viewport(0, 0, target?.width ?? this.canvas.width, target?.height ?? this.canvas.height);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /** Binds targets' textures to units in order, for a program's samplers. */
+  private bindTextures(program: Program, textures: [string, Target][]) {
+    const { gl } = this;
+    gl.useProgram(program.program);
+    textures.forEach(([name, target], unit) => {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, target.texture);
+      gl.uniform1i(program.uniforms[name]!, unit);
+    });
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
+  private drawScene(resources: Resources, targets: Targets) {
+    const { gl, pixelRatio } = this;
     // The body buffer holds the planets, then the Sun.
     const planetCount = PLANETS.length;
 
@@ -807,11 +1173,7 @@ export class OrbitRenderer {
     gl.bindVertexArray(emptyVao);
     gl.activeTexture(gl.TEXTURE0);
 
-    const pass = (target: Target | null) => {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, target?.framebuffer ?? null);
-      gl.viewport(0, 0, target?.width ?? this.canvas.width, target?.height ?? this.canvas.height);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-    };
+    const pass = (target: Target) => this.pass(target);
     const shrink = (source: Target, target: Target, applyTone: number) => {
       gl.useProgram(downsample.program);
       gl.bindTexture(gl.TEXTURE_2D, source.texture);
@@ -836,19 +1198,13 @@ export class OrbitRenderer {
     soften(targets.nearA, targets.nearB);
     soften(targets.farA, targets.farB);
 
-    gl.useProgram(composite.program);
-    const textures: [string, Target][] = [
+    this.bindTextures(composite, [
       ["u_density", targets.density],
       ["u_near", targets.nearA],
       ["u_far", targets.farA],
       ["u_trails", targets.trails],
       ["u_rings", targets.rings],
-    ];
-    textures.forEach(([name, target], unit) => {
-      gl.activeTexture(gl.TEXTURE0 + unit);
-      gl.bindTexture(gl.TEXTURE_2D, target.texture);
-      gl.uniform1i(composite.uniforms[name]!, unit);
-    });
+    ]);
     const { uniforms } = composite;
     gl.uniform1f(uniforms.u_nearGlow!, NEAR_GLOW);
     gl.uniform1f(uniforms.u_farGlow!, FAR_GLOW);
@@ -861,7 +1217,125 @@ export class OrbitRenderer {
     const { width, height } = this.canvas;
     gl.uniform2f(uniforms.u_backgroundCenterPixel!, ((offsetX + 1) / 2) * width, ((offsetY + 1) / 2) * height);
     gl.uniform1f(uniforms.u_backgroundRadius!, Math.hypot(width / 2, height / 2) * this.camera.zoom);
-    pass(null);
+    pass(targets.scene);
+  }
+
+  /** The scene's bright parts at a quarter size: streaked sideways, and blurred for flares. */
+  private drawBright(resources: Resources, targets: Targets) {
+    const { gl, effects } = this;
+    if (effectAmount(effects, "streaks") === 0 && effectAmount(effects, "flare") === 0) return;
+    const { bright, streak, blur, emptyVao } = resources;
+    gl.bindVertexArray(emptyVao);
     gl.activeTexture(gl.TEXTURE0);
+    gl.useProgram(bright.program);
+    gl.bindTexture(gl.TEXTURE_2D, targets.scene.texture);
+    gl.uniform1i(bright.uniforms.u_source!, 0);
+    gl.uniform2f(bright.uniforms.u_texel!, 1 / targets.scene.width, 1 / targets.scene.height);
+    this.pass(targets.brightA);
+
+    // Streaks: each pass reaches further, ending in streakA.
+    gl.useProgram(streak.program);
+    gl.uniform1i(streak.uniforms.u_source!, 0);
+    let source = targets.brightA;
+    STREAK_STEPS.forEach((step, index) => {
+      const target = index % 2 === 0 ? targets.streakA : targets.streakB;
+      gl.bindTexture(gl.TEXTURE_2D, source.texture);
+      gl.uniform2f(streak.uniforms.u_step!, step / source.width, 0);
+      this.pass(target);
+      source = target;
+    });
+    if (source !== targets.streakA) {
+      gl.bindTexture(gl.TEXTURE_2D, source.texture);
+      gl.uniform2f(streak.uniforms.u_step!, 0, 0);
+      this.pass(targets.streakA);
+    }
+
+    // The flare source: brightA, blurred in place.
+    gl.useProgram(blur.program);
+    gl.uniform1i(blur.uniforms.u_source!, 0);
+    const blurPasses: [Target, Target, number, number][] = [
+      [targets.brightA, targets.brightB, 1, 0],
+      [targets.brightB, targets.brightA, 0, 1],
+    ];
+    for (const [from, to, x, y] of blurPasses) {
+      gl.bindTexture(gl.TEXTURE_2D, from.texture);
+      gl.uniform2f(blur.uniforms.u_step!, (x * 2) / from.width, (y * 2) / from.height);
+      this.pass(to);
+    }
+  }
+
+  /** Persistence, then every other screen effect, to the screen. */
+  private drawEffects(resources: Resources, targets: Targets) {
+    const { gl, effects, pixelRatio } = this;
+    const { persist, final, emptyVao } = resources;
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(emptyVao);
+
+    let scene = targets.scene;
+    const persistence = effectAmount(effects, "persistence");
+    if (persistence > 0) {
+      this.bindTextures(persist, [
+        ["u_scene", targets.scene],
+        ["u_history", targets.historyA],
+      ]);
+      const [weakest, strongest] = PERSISTENCE_RANGE as [number, number];
+      gl.uniform1f(persist.uniforms.u_decay!, weakest + (strongest - weakest) * persistence);
+      this.pass(targets.historyB);
+      [targets.historyA, targets.historyB] = [targets.historyB, targets.historyA];
+      scene = targets.historyA;
+    }
+
+    this.bindTextures(final, [
+      ["u_scene", scene],
+      ["u_bright", targets.brightA],
+      ["u_streak", targets.streakA],
+    ]);
+    const { uniforms } = final;
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, resources.overlay);
+    gl.uniform1i(uniforms.u_overlay!, 3);
+    gl.activeTexture(gl.TEXTURE0);
+    const overlayRect = this.overlay?.rect;
+    if (overlayRect) {
+      gl.uniform4f(
+        uniforms.u_overlayRect!,
+        overlayRect.x / this.width,
+        1 - (overlayRect.y + overlayRect.height) / this.height,
+        overlayRect.width / this.width,
+        overlayRect.height / this.height,
+      );
+    } else {
+      gl.uniform4f(uniforms.u_overlayRect!, 0, 0, 0, 0);
+    }
+    const { width, height } = this.canvas;
+    gl.uniform2f(uniforms.u_resolution!, width, height);
+    gl.uniform1f(uniforms.u_pixelRatio!, pixelRatio);
+    gl.uniform1f(uniforms.u_time!, (performance.now() / 1000) % 1000);
+    const { offsetX, offsetY } = this.projection();
+    gl.uniform2f(uniforms.u_sunPixel!, ((offsetX + 1) / 2) * width, ((offsetY + 1) / 2) * height);
+    gl.uniform1f(uniforms.u_sunRadius!, this.sunSize() / 2);
+    const amounts: [string, number][] = [
+      ["u_aberration", effectAmount(effects, "chromaticAberration")],
+      ["u_scanlines", effectAmount(effects, "scanlines")],
+      ["u_curvature", effectAmount(effects, "curvature")],
+      ["u_vignette", effectAmount(effects, "vignette")],
+      ["u_grain", effectAmount(effects, "grain")],
+      ["u_streaks", effectAmount(effects, "streaks")],
+      ["u_flare", effectAmount(effects, "flare")],
+      ["u_starburst", effectAmount(effects, "starburst")],
+      ["u_mask", effectAmount(effects, "phosphorMask")],
+      ["u_flicker", effectAmount(effects, "flicker")],
+    ];
+    for (const [name, amount] of amounts) gl.uniform1f(uniforms[name]!, amount);
+    this.pass(null);
+  }
+
+  /** The Sun's width in device pixels, matching the point shader's sizing. */
+  private sunSize() {
+    const growth = zoomGrowth(this.camera.zoom);
+    const logDiameter = this.bodies[PLANETS.length * FLOATS_PER_ORBIT + 9]!;
+    const base = Math.max(0.5, POINT_SIZE * growth * this.pixelRatio);
+    const decades = Math.max(logDiameter - Math.log10(MIN_DIAMETER_KM), 0);
+    return Math.min((base + SIZE_PER_DECADE * growth * this.pixelRatio * decades) * SUN_SIZE_BOOST, this.maxPointSize - 1);
   }
 }

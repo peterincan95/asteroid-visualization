@@ -15,6 +15,14 @@
     0 8px 28px rgb(0 0 0 / 45%);
   --radius: 999px;
   --inset: 20px;
+  /* Retro display look for the player: phosphor cyan on a dark glass panel. */
+  --hud: #8fd8ff;
+  --hud-dim: rgb(143 216 255 / 42%);
+  --hud-faint: rgb(143 216 255 / 12%);
+  --hud-glow: 0 0 6px rgb(143 216 255 / 55%);
+  --hud-panel: rgb(8 12 18 / 80%);
+  --hud-chamfer: 10px;
+  --hud-font: "Share Tech Mono", "Roboto Mono", ui-monospace, monospace;
   --mono: "Roboto Mono", ui-monospace, monospace;
   font-family: "Roboto Condensed", system-ui, sans-serif;
   color: var(--text);
@@ -66,103 +74,292 @@ body,
 
 /* ---- Player ---- */
 
+/* The outer element is the outline: a chamfered shape filled with the line color,
+   with the panel inset 1px inside it so only a thin edge shows. */
 .player {
   position: absolute;
   left: 50%;
   bottom: var(--inset);
   transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  padding: 1px;
+  background: var(--hud-dim);
+  clip-path: polygon(
+    var(--hud-chamfer) 0,
+    calc(100% - var(--hud-chamfer)) 0,
+    100% var(--hud-chamfer),
+    100% calc(100% - var(--hud-chamfer)),
+    calc(100% - var(--hud-chamfer)) 100%,
+    var(--hud-chamfer) 100%,
+    0 calc(100% - var(--hud-chamfer)),
+    0 var(--hud-chamfer)
+  );
+  filter: drop-shadow(0 0 10px rgb(143 216 255 / 18%));
+  user-select: none;
+  font-family: var(--hud-font);
+  color: var(--hud);
+}
+
+/* While the player is painted into the plot, the HTML stays on top, invisible, to take
+   clicks and keyboard focus. */
+.player.is-painted {
+  opacity: 0;
+}
+
+.player-panel {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
-  max-width: calc(100% - 32px);
-  border: 1px solid var(--glass-stroke);
-  border-radius: var(--radius);
-  background: var(--glass-sheen), var(--glass);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: var(--glass-shadow);
-  user-select: none;
+  gap: 10px;
+  padding: 8px 14px;
+  background:
+    /* Faint scanlines */
+    repeating-linear-gradient(0deg, rgb(143 216 255 / 4%) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, rgb(143 216 255 / 7%), transparent 55%),
+    var(--hud-panel);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  clip-path: inherit;
 }
 
 .player button {
   font: inherit;
   color: inherit;
-  border: 0;
   background: none;
   cursor: pointer;
 }
 
 .player button:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
+  outline: 1px solid var(--hud);
+  outline-offset: 2px;
+}
+
+/* ---- Date readout ---- */
+
+.player-readout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 150px;
+}
+
+.player-date {
+  font-size: 18px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-shadow: var(--hud-glow);
+}
+
+.player-light {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--hud-dim);
+}
+
+.player-light.is-on {
+  background: var(--hud);
+  box-shadow: var(--hud-glow);
+  animation: player-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes player-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* ---- Transport buttons ---- */
+
+.player-buttons {
+  display: flex;
+  gap: 6px;
 }
 
 .player-button {
+  position: relative;
   display: grid;
   place-items: center;
   width: 36px;
   height: 36px;
-  border-radius: 50%;
+  border: 1px solid var(--hud-faint);
+}
+
+/* Corner brackets */
+.player-button::before,
+.player-button::after {
+  content: "";
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-color: var(--hud-dim);
+  border-style: solid;
+  pointer-events: none;
+}
+
+.player-button::before {
+  top: -1px;
+  left: -1px;
+  border-width: 1px 0 0 1px;
+}
+
+.player-button::after {
+  right: -1px;
+  bottom: -1px;
+  border-width: 0 1px 1px 0;
 }
 
 .player-button:hover:not(:disabled) {
-  background: var(--button-hover);
+  background: var(--hud-faint);
+  filter: drop-shadow(0 0 4px rgb(143 216 255 / 60%));
 }
 
 .player-button:active:not(:disabled) {
-  background: var(--button-active);
+  background: rgb(143 216 255 / 22%);
 }
 
 .player-button:disabled {
-  opacity: 0.35;
+  opacity: 0.3;
   cursor: default;
 }
 
 .player-play {
   width: 42px;
-  height: 42px;
-  background: var(--button-hover);
+  border-color: var(--hud-dim);
 }
 
-.player-date,
+.player-play.is-playing {
+  background: var(--hud-faint);
+}
+
+/* ---- Speed ---- */
+
 .player-speed {
-  font-family: var(--mono);
-  font-size: 14px;
-  font-variant-numeric: tabular-nums;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  min-width: 120px;
+}
+
+.speed-meter {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 10px;
+}
+
+.speed-tick {
+  width: 4px;
+  height: 6px;
+  background: var(--hud-faint);
+}
+
+/* A wider gap marks the switch from reverse to forward. */
+.speed-tick.is-zero {
+  margin-left: 5px;
+}
+
+.speed-tick.is-lit {
+  background: var(--hud-dim);
+}
+
+.speed-tick.is-current {
+  height: 10px;
+  background: var(--hud);
+  box-shadow: var(--hud-glow);
+}
+
+.player-speed-text {
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   white-space: nowrap;
-}
-
-.player-date {
-  min-width: 112px;
-  padding: 8px 12px;
-  border-radius: var(--radius);
-  text-align: center;
-}
-
-.player-date:hover {
-  background: var(--button-hover);
-}
-
-.player-speed {
-  min-width: 112px;
-  padding: 0 12px;
-  text-align: center;
-  color: var(--text-muted);
+  opacity: 0.8;
 }
 
 .player-divider {
+  align-self: stretch;
   width: 1px;
-  height: 22px;
-  background: var(--divider);
-  margin: 0 4px;
+  margin: 2px 0;
+  background: linear-gradient(180deg, transparent, var(--hud-dim), transparent);
 }
 
-@media (max-width: 480px) {
-  .player-date,
+@media (max-width: 560px) {
+  .player-panel {
+    gap: 6px;
+    padding: 6px 10px;
+  }
+
+  .player-readout {
+    min-width: 0;
+  }
+
+  .player-date {
+    font-size: 13px;
+    letter-spacing: 0.06em;
+  }
+
+  .player-light,
+  .speed-meter {
+    display: none;
+  }
+
   .player-speed {
     min-width: 0;
-    padding: 0 6px;
-    font-size: 12px;
   }
+
+  .player-speed-text {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+  }
+
+  .player-button {
+    width: 32px;
+    height: 32px;
+  }
+
+  .player-play {
+    width: 36px;
+  }
+}
+
+/* ---- Screen effects toggle ---- */
+
+.effects-toggle {
+  position: absolute;
+  top: var(--inset);
+  right: var(--inset);
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--hud-dim);
+  background: var(--hud-panel);
+  color: var(--hud);
+  cursor: pointer;
+  clip-path: polygon(
+    var(--hud-chamfer) 0,
+    100% 0,
+    100% calc(100% - var(--hud-chamfer)),
+    calc(100% - var(--hud-chamfer)) 100%,
+    0 100%,
+    0 var(--hud-chamfer)
+  );
+}
+
+.effects-toggle:hover {
+  background: var(--hud-faint);
+}
+
+.effects-toggle[aria-pressed="false"] {
+  color: var(--hud-dim);
+}
+
+.effects-toggle:focus-visible {
+  outline: 1px solid var(--hud);
+  outline-offset: -4px;
 }
