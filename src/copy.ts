@@ -17,8 +17,7 @@ export const COPY = {
     pause: "Ipsum",
     slower: "Dolor",
     faster: "Sit amet",
-    today: "Lorem",
-    todayHint: "Lorem ipsum dolor",
+    reset: "Lorem ipsum",
     speedLabel: "Lorem ipsum",
   },
   /** Speed units, as shown in the readout: count, unit, then "per second". */
@@ -29,4 +28,5 @@ export const COPY = {
     year: ["year", "years"],
   } satisfies Record<SpeedUnit, [string, string]>,
   perSecond: "/s",
+  effectsToggle: "Lorem ipsum",
 };
