@@ -39,7 +39,7 @@ export const DEFAULT_SPEED_INDEX = SPEEDS.findIndex((speed) => speed.unit === "m
 const dateFormat = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
   month: "short",
-  day: "numeric",
+  day: "2-digit",
   timeZone: "UTC",
 });
 
