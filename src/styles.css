@@ -6,7 +6,6 @@
   --divider: rgb(255 255 255 / 16%);
   --button-hover: rgb(255 255 255 / 10%);
   --button-active: rgb(255 255 255 / 18%);
-  --focus: #7fb4ff;
   --glass: rgb(18 18 18 / 68%);
   --glass-sheen: linear-gradient(180deg, rgb(255 255 255 / 8%), rgb(255 255 255 / 2%) 42%, rgb(255 255 255 / 0%));
   --glass-stroke: rgb(214 214 214 / 35%);
@@ -15,16 +14,17 @@
     0 8px 28px rgb(0 0 0 / 45%);
   --radius: 999px;
   --inset: 20px;
-  /* Retro display look for the player: phosphor cyan on a dark glass panel. */
-  --hud: #8fd8ff;
-  --hud-dim: rgb(143 216 255 / 42%);
-  --hud-faint: rgb(143 216 255 / 12%);
-  --hud-glow: 0 0 6px rgb(143 216 255 / 55%);
+  /* Retro display look for the player: frosty white on a dark glass panel. */
+  --hud: #e8f2fa;
+  --hud-dim: rgb(232 242 250 / 42%);
+  --hud-faint: rgb(232 242 250 / 12%);
+  --hud-glow: 0 0 6px rgb(232 242 250 / 55%);
   --hud-panel: rgb(8 12 18 / 80%);
-  --hud-chamfer: 10px;
-  --hud-font: "Share Tech Mono", "Roboto Mono", ui-monospace, monospace;
-  --mono: "Roboto Mono", ui-monospace, monospace;
-  font-family: "Roboto Condensed", system-ui, sans-serif;
+  /* Century Gothic where it's installed; Didact Gothic (loaded in index.html) elsewhere.
+     Planet labels use the same stack (LABEL_FONT_FAMILY in renderer.ts). */
+  --ui-font: "Century Gothic", "Didact Gothic", sans-serif;
+  --hud-font: var(--ui-font);
+  font-family: var(--ui-font);
   color: var(--text);
   background: var(--background);
   color-scheme: dark;
@@ -74,7 +74,7 @@ body,
 
 /* ---- Player ---- */
 
-/* The outer element is the outline: a chamfered shape filled with the line color,
+/* The outer element is the outline: a rectangle filled with the line color,
    with the panel inset 1px inside it so only a thin edge shows. */
 .player {
   position: absolute;
@@ -84,17 +84,7 @@ body,
   max-width: calc(100% - 32px);
   padding: 1px;
   background: var(--hud-dim);
-  clip-path: polygon(
-    var(--hud-chamfer) 0,
-    calc(100% - var(--hud-chamfer)) 0,
-    100% var(--hud-chamfer),
-    100% calc(100% - var(--hud-chamfer)),
-    calc(100% - var(--hud-chamfer)) 100%,
-    var(--hud-chamfer) 100%,
-    0 calc(100% - var(--hud-chamfer)),
-    0 var(--hud-chamfer)
-  );
-  filter: drop-shadow(0 0 10px rgb(143 216 255 / 18%));
+  filter: drop-shadow(0 0 10px rgb(232 242 250 / 18%));
   user-select: none;
   font-family: var(--hud-font);
   color: var(--hud);
@@ -114,12 +104,11 @@ body,
   padding: 8px 14px;
   background:
     /* Faint scanlines */
-    repeating-linear-gradient(0deg, rgb(143 216 255 / 4%) 0 1px, transparent 1px 3px),
-    linear-gradient(180deg, rgb(143 216 255 / 7%), transparent 55%),
+    repeating-linear-gradient(0deg, rgb(232 242 250 / 4%) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, rgb(232 242 250 / 7%), transparent 55%),
     var(--hud-panel);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  clip-path: inherit;
 }
 
 .player button {
@@ -150,6 +139,9 @@ body,
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   text-shadow: var(--hud-glow);
+  /* Room for the widest month (NOV), so the player doesn't resize as months change. */
+  display: inline-block;
+  min-width: 8.2em;
 }
 
 .player-light {
@@ -213,11 +205,11 @@ body,
 
 .player-button:hover:not(:disabled) {
   background: var(--hud-faint);
-  filter: drop-shadow(0 0 4px rgb(143 216 255 / 60%));
+  filter: drop-shadow(0 0 4px rgb(232 242 250 / 60%));
 }
 
 .player-button:active:not(:disabled) {
-  background: rgb(143 216 255 / 22%);
+  background: rgb(232 242 250 / 22%);
 }
 
 .player-button:disabled {
@@ -341,14 +333,6 @@ body,
   background: var(--hud-panel);
   color: var(--hud);
   cursor: pointer;
-  clip-path: polygon(
-    var(--hud-chamfer) 0,
-    100% 0,
-    100% calc(100% - var(--hud-chamfer)),
-    calc(100% - var(--hud-chamfer)) 100%,
-    0 100%,
-    0 var(--hud-chamfer)
-  );
 }
 
 .effects-toggle:hover {

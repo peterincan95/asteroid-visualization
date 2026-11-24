@@ -41,6 +41,10 @@ interface Resources {
   emptyVao: WebGLVertexArrayObject;
   /** The painted player (see hudPainter.ts), blended in before the screen effects. */
   overlay: WebGLTexture;
+  labels: Program;
+  labelVao: WebGLVertexArrayObject;
+  labelBuffer: WebGLBuffer;
+  labelAtlas: WebGLTexture;
 }
 
 interface Targets {
@@ -157,6 +161,28 @@ export const BACKGROUND_EDGE = "#0f1014";
 // ---- Glow --------------------------------------------------------------------------
 const NEAR_GLOW = 0.3;
 const FAR_GLOW = 0.75;
+
+// ---- Planet labels -----------------------------------------------------------------
+// Labels fade in as you zoom from the first level to the second (1 shows the whole plot).
+const LABEL_ZOOM = [2.5, 4];
+// Century Gothic where it's installed; Didact Gothic (loaded in index.html) elsewhere.
+const LABEL_FONT_FAMILY = '"Century Gothic", "Didact Gothic", sans-serif';
+const LABEL_FONT_WEIGHT = "bold";
+// Size and letter spacing in CSS pixels.
+const LABEL_FONT_SIZE = 12;
+const LABEL_LETTER_SPACING = 4;
+// The leader runs out from the planet's edge (after a gap) to an elbow, then turns to
+// underline the name along the orbit. All in CSS pixels.
+const LABEL_GAP = 3;
+const LABEL_LEADER = 34;
+const LABEL_LINE_WIDTH = 1;
+// Where the name starts along the underline, how far it sits above it, and how far the
+// underline runs past its end.
+const LABEL_TEXT_INSET = 8;
+const LABEL_TEXT_LIFT = 5;
+const LABEL_UNDERLINE_TAIL = 2;
+const LABEL_COLOR = "#e8f2fa";
+const LABEL_OPACITY = 0.85;
 
 // ---- Screen effects ----------------------------------------------------------------
 // Each effect's strength (0 to 1) comes from the effects menu; these set what full
@@ -485,6 +511,70 @@ void main() {
   color = vec4(screen(background, rgb), 1.0);
 }`;
 
+// Planet labels: textured quads in device pixels, cut from the label atlas.
+const LABEL_VERTEX = `#version 300 es
+layout(location = 0) in vec2 a_position;
+layout(location = 1) in vec2 a_uv;
+uniform vec2 u_viewport;
+out vec2 v_uv;
+void main() {
+  v_uv = a_uv;
+  gl_Position = vec4(a_position / u_viewport * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const LABEL_FRAGMENT = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_atlas;
+// Premultiplied.
+uniform vec4 u_color;
+out vec4 color;
+void main() {
+  color = u_color * texture(u_atlas, v_uv).a;
+}`;
+
+/** Where each planet's name sits in the label atlas, in atlas pixels. */
+interface AtlasEntry {
+  left: number;
+  baseline: number;
+  width: number;
+}
+
+interface LabelAtlas {
+  pixelRatio: number;
+  width: number;
+  height: number;
+  entries: AtlasEntry[];
+  /** Height of capitals above the baseline, and the room every row has above and below it. */
+  capHeight: number;
+  ascent: number;
+  descent: number;
+  pad: number;
+}
+
+// Mirrors plotPosition() in ORBIT_GLSL, for the few bodies placed on the CPU.
+const INV_LOG_EDGE = 1 / Math.log(1 + SCALE_EDGE_AU / SCALE_R0_AU);
+function plotPositionAt(orbits: Float32Array, index: number, t: number): [number, number] {
+  const o = index * FLOATS_PER_ORBIT;
+  const [px, py, qx, qy, a, e, m0, n, epoch] = [0, 1, 2, 3, 4, 5, 6, 7, 8].map((k) => orbits[o + k]!) as number[];
+  const tau = Math.PI * 2;
+  const M = (((m0! + n! * (t - epoch!)) % tau) + tau) % tau;
+  let E = e! < 0.8 ? M + e! * Math.sin(M) : Math.PI;
+  for (let step = 0; step < 12; step += 1) E -= (E - e! * Math.sin(E) - M) / (1 - e! * Math.cos(E));
+  const ox = a! * (Math.cos(E) - e!);
+  const oy = a! * Math.sqrt(1 - e! * e!) * Math.sin(E);
+  const x = ox * px! + oy * qx!;
+  const y = ox * py! + oy * qy!;
+  const r = Math.max(Math.hypot(x, y), 1e-6);
+  const scale = (Math.log(1 + r / SCALE_R0_AU) * INV_LOG_EDGE) / r;
+  return [x * scale, y * scale];
+}
+
+const smoothstep = (edge0: number, edge1: number, x: number) => {
+  const t = Math.min(Math.max((x - edge0) / (edge1 - edge0), 0), 1);
+  return t * t * (3 - 2 * t);
+};
+
 const glslColor = (hex: string) => `vec3(${hexChannels(hex).map((channel) => channel.toFixed(4)).join(", ")})`;
 
 // A quarter-size copy of the scene's light above the threshold, thresholded per tap so
@@ -754,6 +844,7 @@ export class OrbitRenderer {
   // Whether bodies, camera or size changed since the scene was last drawn; screen effects
   // alone can redraw from the stored scene.
   private sceneDirty = true;
+  private atlas: LabelAtlas | null = null;
   private overlay: { source: HTMLCanvasElement; rect: { x: number; y: number; width: number; height: number } } | null =
     null;
 
@@ -782,6 +873,11 @@ export class OrbitRenderer {
     canvas.addEventListener("webglcontextlost", this.onContextLost);
     canvas.addEventListener("webglcontextrestored", this.onContextRestored);
     this.createResources();
+    void document.fonts.load(`${LABEL_FONT_WEIGHT} ${LABEL_FONT_SIZE}px ${LABEL_FONT_FAMILY}`).then(() => {
+      this.atlas = null;
+      this.sceneDirty = true;
+      this.requestDraw();
+    });
   }
 
   destroy() {
@@ -905,7 +1001,29 @@ export class OrbitRenderer {
     const [asteroidPoints, asteroidStrips] = orbitVaos(this.data.orbits);
     const [bodyPoints, bodyStrips] = orbitVaos(this.bodies);
 
+    // Label vertices: x, y in device pixels, then u, v in the atlas; rewritten every frame.
+    const labelBuffer = gl.createBuffer()!;
+    const labelVao = gl.createVertexArray()!;
+    gl.bindVertexArray(labelVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, labelBuffer);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+    gl.bindVertexArray(null);
+    const labelAtlas = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, labelAtlas);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.atlas = null;
+
     this.resources = {
+      labels: createProgram(gl, LABEL_VERTEX, LABEL_FRAGMENT, ["u_viewport", "u_atlas", "u_color"]),
+      labelVao,
+      labelBuffer,
+      labelAtlas,
       points: createProgram(gl, POINT_VERTEX, POINT_FRAGMENT, [
         ...ORBIT_UNIFORMS,
         "u_lightSize",
@@ -1094,6 +1212,7 @@ export class OrbitRenderer {
     if (!resources || !targets) return;
     if (this.sceneDirty) {
       this.drawScene(resources, targets);
+      this.drawLabels(resources, targets);
       this.drawBright(resources, targets);
       this.sceneDirty = false;
     }
@@ -1330,12 +1449,176 @@ export class OrbitRenderer {
     this.pass(null);
   }
 
-  /** The Sun's width in device pixels, matching the point shader's sizing. */
-  private sunSize() {
+  /** A body's width in device pixels, matching the point shader's sizing. */
+  private bodySize(index: number, boost: number) {
     const growth = zoomGrowth(this.camera.zoom);
-    const logDiameter = this.bodies[PLANETS.length * FLOATS_PER_ORBIT + 9]!;
+    const logDiameter = this.bodies[index * FLOATS_PER_ORBIT + 9]!;
     const base = Math.max(0.5, POINT_SIZE * growth * this.pixelRatio);
     const decades = Math.max(logDiameter - Math.log10(MIN_DIAMETER_KM), 0);
-    return Math.min((base + SIZE_PER_DECADE * growth * this.pixelRatio * decades) * SUN_SIZE_BOOST, this.maxPointSize - 1);
+    return Math.min((base + SIZE_PER_DECADE * growth * this.pixelRatio * decades) * boost, this.maxPointSize - 1);
+  }
+
+  private sunSize() {
+    return this.bodySize(PLANETS.length, SUN_SIZE_BOOST);
+  }
+
+  /** Renders every planet's name, white on clear, for the label quads to cut from. */
+  private buildAtlas(texture: WebGLTexture): LabelAtlas {
+    const { gl, pixelRatio } = this;
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d")!;
+    const font = `${LABEL_FONT_WEIGHT} ${LABEL_FONT_SIZE * pixelRatio}px ${LABEL_FONT_FAMILY}`;
+    const spacing = LABEL_LETTER_SPACING * pixelRatio;
+    const names = PLANETS.map((planet) => planet.name.toUpperCase());
+    const measure = () => {
+      context.font = font;
+      const widths = names.map((name) =>
+        [...name].reduce((sum, character) => sum + context.measureText(character).width, 0) + spacing * (name.length - 1),
+      );
+      const metrics = names.map((name) => context.measureText(name));
+      return {
+        widths,
+        capHeight: context.measureText("H").actualBoundingBoxAscent,
+        ascent: Math.ceil(Math.max(...metrics.map((m) => m.actualBoundingBoxAscent))),
+        descent: Math.ceil(Math.max(...metrics.map((m) => m.actualBoundingBoxDescent))),
+      };
+    };
+    const { widths, capHeight, ascent, descent } = measure();
+    const pad = Math.ceil(2 * pixelRatio);
+    // A solid block at the top left for the leader lines, then one row per name.
+    const block = 4;
+    const rowHeight = ascent + descent + pad * 2;
+    canvas.width = Math.ceil(Math.max(...widths, block)) + pad * 2;
+    canvas.height = block + rowHeight * names.length;
+    context.font = font;
+    context.fillStyle = "#fff";
+    context.textBaseline = "alphabetic";
+    context.fillRect(0, 0, block, block);
+    const entries = names.map((name, index) => {
+      const baseline = block + rowHeight * index + pad + ascent;
+      let x = pad;
+      for (const character of name) {
+        context.fillText(character, x, baseline);
+        x += context.measureText(character).width + spacing;
+      }
+      return { left: pad, baseline, width: widths[index]! };
+    });
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    return { pixelRatio, width: canvas.width, height: canvas.height, entries, capHeight, ascent, descent, pad };
+  }
+
+  /**
+   * Each planet's name on a leader line pointing away from the Sun, written along its
+   * orbit. Text is turned half around on the Sun's lower side so it's never upside down.
+   * Drawn into the scene, so the screen effects apply.
+   */
+  private drawLabels(resources: Resources, targets: Targets) {
+    const { gl, pixelRatio } = this;
+    const fade = smoothstep(LABEL_ZOOM[0]!, LABEL_ZOOM[1]!, this.camera.zoom);
+    if (fade <= 0) return;
+    if (!this.atlas || this.atlas.pixelRatio !== pixelRatio) this.atlas = this.buildAtlas(resources.labelAtlas);
+    const atlas = this.atlas;
+    const { width, height } = this.canvas;
+    const { scaleX, scaleY, offsetX, offsetY } = this.projection();
+    const toPixels = ([x, y]: [number, number]): [number, number] => [
+      ((x * scaleX + offsetX + 1) / 2) * width,
+      ((y * scaleY + offsetY + 1) / 2) * height,
+    ];
+    const sun = toPixels([0, 0]);
+    const vertices: number[] = [];
+    // Two triangles from a corner and two edge vectors, with matching atlas corners.
+    const quad = (
+      origin: [number, number],
+      across: [number, number],
+      up: [number, number],
+      uv0: [number, number],
+      uv1: [number, number],
+    ) => {
+      const corner = (a: number, b: number) => [
+        origin[0] + across[0] * a + up[0] * b,
+        origin[1] + across[1] * a + up[1] * b,
+        uv0[0] + (uv1[0] - uv0[0]) * a,
+        uv0[1] + (uv1[1] - uv0[1]) * b,
+      ];
+      vertices.push(...corner(0, 0), ...corner(1, 0), ...corner(1, 1), ...corner(0, 0), ...corner(1, 1), ...corner(0, 1));
+    };
+    const solid: [number, number] = [2 / atlas.width, 2 / atlas.height];
+
+    PLANETS.forEach((_, index) => {
+      const entry = atlas.entries[index]!;
+      const position = toPixels(plotPositionAt(this.bodies, index, this.time));
+      const period = (2 * Math.PI) / this.bodies[index * FLOATS_PER_ORBIT + 7]!;
+      const ahead = toPixels(plotPositionAt(this.bodies, index, this.time + period / 720));
+      const behind = toPixels(plotPositionAt(this.bodies, index, this.time - period / 720));
+      const motionLength = Math.hypot(ahead[0] - behind[0], ahead[1] - behind[1]) || 1;
+      // Outward: across the orbit, on the side away from the Sun.
+      let out: [number, number] = [-(ahead[1] - behind[1]) / motionLength, (ahead[0] - behind[0]) / motionLength];
+      if (out[0] * (position[0] - sun[0]) + out[1] * (position[1] - sun[1]) < 0) out = [-out[0], -out[1]];
+      // Reading direction, a quarter turn clockwise from outward.
+      const along: [number, number] = [out[1], -out[0]];
+      const radius = this.bodySize(index, PLANET_SIZE_BOOST) / 2;
+      const px = (cssPixels: number) => cssPixels * pixelRatio;
+      const point = (alongDistance: number, outDistance: number): [number, number] => [
+        position[0] + along[0] * alongDistance + out[0] * outDistance,
+        position[1] + along[1] * alongDistance + out[1] * outDistance,
+      ];
+      // A line of the label's width between two points.
+      const line = (from: [number, number], to: [number, number]) => {
+        const length = Math.hypot(to[0] - from[0], to[1] - from[1]) || 1;
+        const half = px(LABEL_LINE_WIDTH) / 2;
+        const side: [number, number] = [(-(to[1] - from[1]) / length) * half, ((to[0] - from[0]) / length) * half];
+        quad([from[0] - side[0], from[1] - side[1]], [to[0] - from[0], to[1] - from[1]], [side[0] * 2, side[1] * 2], solid, solid);
+      };
+      const elbowOut = radius + px(LABEL_GAP + LABEL_LEADER);
+      const textStart = px(LABEL_TEXT_INSET);
+      const textEnd = textStart + entry.width;
+      line(point(0, radius + px(LABEL_GAP)), point(0, elbowOut));
+      // The underline runs back along the trail; extended by half a line so the corner is square.
+      line(point(-px(LABEL_LINE_WIDTH) / 2, elbowOut), point(textEnd + px(LABEL_UNDERLINE_TAIL), elbowOut));
+
+      // The name sits on the underline. On the Sun's lower side (outward pointing down the
+      // screen) it turns half around so it's never upside down, sitting on the line's inner
+      // side and still covering the same stretch of it.
+      const flipped = out[1] < 0;
+      const xAxis: [number, number] = flipped ? [-along[0], -along[1]] : along;
+      const yAxis: [number, number] = flipped ? [-out[0], -out[1]] : out;
+      const baseline = flipped
+        ? point(textEnd, elbowOut - px(LABEL_TEXT_LIFT))
+        : point(textStart, elbowOut + px(LABEL_TEXT_LIFT));
+      const left = -atlas.pad;
+      const right = entry.width + atlas.pad;
+      const bottom = -(atlas.descent + atlas.pad);
+      const top = atlas.ascent + atlas.pad;
+      quad(
+        [baseline[0] + xAxis[0] * left + yAxis[0] * bottom, baseline[1] + xAxis[1] * left + yAxis[1] * bottom],
+        [xAxis[0] * (right - left), xAxis[1] * (right - left)],
+        [yAxis[0] * (top - bottom), yAxis[1] * (top - bottom)],
+        [(entry.left + left) / atlas.width, (entry.baseline - bottom) / atlas.height],
+        [(entry.left + right) / atlas.width, (entry.baseline - top) / atlas.height],
+      );
+    });
+
+    const { labels, labelVao, labelBuffer, labelAtlas } = resources;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, targets.scene.framebuffer);
+    gl.viewport(0, 0, width, height);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(labels.program);
+    gl.uniform2f(labels.uniforms.u_viewport!, width, height);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, labelAtlas);
+    gl.uniform1i(labels.uniforms.u_atlas!, 0);
+    const [r, g, b] = hexChannels(LABEL_COLOR);
+    const alpha = LABEL_OPACITY * fade;
+    gl.uniform4f(labels.uniforms.u_color!, r! * alpha, g! * alpha, b! * alpha, alpha);
+    gl.bindVertexArray(labelVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, labelBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.DYNAMIC_DRAW);
+    gl.drawArrays(gl.TRIANGLES, 0, vertices.length / 4);
+    gl.disable(gl.BLEND);
   }
 }
