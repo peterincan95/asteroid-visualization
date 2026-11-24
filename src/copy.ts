@@ -1,3 +1,4 @@
+import type { FilterId } from "./filters";
 import type { SpeedUnit } from "./time";
 
 /**
@@ -30,4 +31,12 @@ export const COPY = {
   } satisfies Record<SpeedUnit, [string, string]>,
   perSecond: "/s",
   effectsToggle: "Screen Effects",
+  filters: {
+    title: "Filters",
+    reset: "Reset",
+    minimum: "minimum",
+    maximum: "maximum",
+    names: { a: "Semimajor Axis", diameter: "Diameter", e: "Eccentricity" } satisfies Record<FilterId, string>,
+    units: { a: "AU", diameter: "km", e: "" } satisfies Record<FilterId, string>,
+  },
 };
