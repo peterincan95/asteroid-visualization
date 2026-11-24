@@ -75,7 +75,7 @@ function RangeSlider({
 
 /** Sliders that limit which asteroids are shown. Planets are never filtered. */
 export function FilterPanel({ scales, positions, onChange, isPainted, ref }: Props) {
-  const [isOpen, setIsOpen] = useState(true);
+  const [isOpen, setIsOpen] = useState(false);
   return (
     <section ref={ref} className={`filters ${isPainted ? "is-painted" : ""}`} aria-label={COPY.filters.title}>
       <div className="filters-header">

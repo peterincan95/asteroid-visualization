@@ -25,7 +25,7 @@ export type EffectSettings = Record<EffectId, EffectSetting>;
 
 /** The display look. A strength stays set while its effect is off, for easy tuning here. */
 export const DEFAULT_EFFECTS: EffectSettings = {
-  chromaticAberration: { enabled: true, strength: 0.6 },
+  chromaticAberration: { enabled: true, strength: 0.35 },
   scanlines: { enabled: true, strength: 0.32 },
   curvature: { enabled: true, strength: 0.11 },
   vignette: { enabled: true, strength: 0.56 },
