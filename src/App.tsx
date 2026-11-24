@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { COPY } from "./copy";
 import { loadOrbits, type OrbitData } from "./data";
 import { DEFAULT_EFFECTS, loadEffectsOn, NO_EFFECTS, saveEffectsOn } from "./effects";
-import { HudPainter } from "./hudPainter";
+import { HudPainter, isPlayerAnimated, paintFilters, paintPlayer } from "./hudPainter";
+import { FilterPanel } from "./FilterPanel";
+import { filterScales, FULL_POSITIONS, toOrbitFilter, type FilterPositions } from "./filters";
 import { PanZoom } from "./panZoom";
 import { colorTable } from "./colors";
 import { bodyOrbits } from "./planets";
@@ -33,7 +35,8 @@ function Visualization({ data }: { data: OrbitData }) {
   const { referenceJd } = data.meta;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const playerRef = useRef<HTMLDivElement>(null);
-  const [isPlayerPainted, setIsPlayerPainted] = useState(false);
+  const filtersRef = useRef<HTMLElement>(null);
+  const [isPainted, setIsPainted] = useState(false);
   const rendererRef = useRef<OrbitRenderer | null>(null);
   const daysRef = useRef(daysAt(new Date(), referenceJd));
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +44,9 @@ function Visualization({ data }: { data: OrbitData }) {
   const [speedIndex, setSpeedIndex] = useState(DEFAULT_SPEED_INDEX);
   const [effectsOn, setEffectsOn] = useState(loadEffectsOn);
   const effectsOnRef = useRef(effectsOn);
+  const scales = useMemo(() => filterScales(data.orbits, data.count), [data]);
+  const [filterPositions, setFilterPositions] = useState<FilterPositions>(FULL_POSITIONS);
+  const filterRef = useRef(toOrbitFilter(filterPositions, scales));
   // The date shown in the player, updated once per simulated day.
   const [shownDay, setShownDay] = useState(() => Math.floor(daysRef.current));
 
@@ -59,18 +65,22 @@ function Visualization({ data }: { data: OrbitData }) {
     rendererRef.current = renderer;
     renderer.setTime(daysRef.current);
     renderer.setEffects(effectsOnRef.current ? DEFAULT_EFFECTS : NO_EFFECTS);
+    renderer.setFilter(filterRef.current);
     const observer = new ResizeObserver(() => {
       const { width, height } = canvas.getBoundingClientRect();
       renderer.setLayout(width, height);
     });
     observer.observe(canvas);
     const panZoom = new PanZoom(canvas, (camera) => renderer.setCamera(camera));
-    // The player is painted into the plot so the screen effects reach it too.
-    const painter = new HudPainter(playerRef.current!, canvas, (source, rect) => renderer.setOverlay(source, rect));
-    setIsPlayerPainted(true);
+    // The UI panels are painted into the plot so the screen effects reach them too.
+    const painters = [
+      new HudPainter(playerRef.current!, canvas, paintPlayer, (source, rect) => renderer.setOverlay(0, source, rect), isPlayerAnimated),
+      new HudPainter(filtersRef.current!, canvas, paintFilters, (source, rect) => renderer.setOverlay(1, source, rect)),
+    ];
+    setIsPainted(true);
     return () => {
-      painter.destroy();
-      setIsPlayerPainted(false);
+      for (const painter of painters) painter.destroy();
+      setIsPainted(false);
       observer.disconnect();
       panZoom.destroy();
       renderer.destroy();
@@ -84,6 +94,12 @@ function Visualization({ data }: { data: OrbitData }) {
     rendererRef.current?.setEffects(effectsOn ? DEFAULT_EFFECTS : NO_EFFECTS);
     saveEffectsOn(effectsOn);
   }, [effectsOn]);
+
+  // Which asteroids are shown.
+  useEffect(() => {
+    filterRef.current = toOrbitFilter(filterPositions, scales);
+    rendererRef.current?.setFilter(filterRef.current);
+  }, [filterPositions, scales]);
 
   // The clock.
   useEffect(() => {
@@ -136,6 +152,13 @@ function Visualization({ data }: { data: OrbitData }) {
           <path d="M7.5 9.5h9M7.5 12.5h6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
         </svg>
       </button>
+      <FilterPanel
+        scales={scales}
+        positions={filterPositions}
+        onChange={setFilterPositions}
+        isPainted={isPainted}
+        ref={filtersRef}
+      />
       <Player
         date={dateAt(shownDay, referenceJd)}
         isPlaying={isPlaying}
@@ -143,7 +166,7 @@ function Visualization({ data }: { data: OrbitData }) {
         onTogglePlay={() => setIsPlaying((playing) => !playing)}
         onSpeedChange={setSpeedIndex}
         onReset={reset}
-        isPainted={isPlayerPainted}
+        isPainted={isPainted}
         ref={playerRef}
       />
     </main>
