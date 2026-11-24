@@ -1,0 +1,33 @@
+{
+  "count": 14789,
+  "fields": [
+    "a",
+    "e",
+    "i",
+    "om",
+    "w",
+    "ma",
+    "epoch_days",
+    "D",
+    "family_index"
+  ],
+  "referenceJd": 2461200.5,
+  "families": [
+    "Atira",
+    "Aten",
+    "Apollo",
+    "Amor",
+    "Inner (other)",
+    "Hungaria",
+    "Mars-crosser",
+    "Main belt inner",
+    "Main belt middle",
+    "Main belt outer",
+    "Outer belt",
+    "Hilda",
+    "Trojan",
+    "Centaur",
+    "TNO",
+    "Other"
+  ]
+}

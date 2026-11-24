@@ -1,0 +1,9 @@
+# The full JPL export is about 200 MB, too big for GitHub. See the README to
+# download it again and rebuild public/data.
+data/all-asteroids.csv
+
+node_modules/
+dist/
+*.log
+.DS_Store
+__pycache__/
