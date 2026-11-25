@@ -262,8 +262,8 @@ export function paintPlayer(kit: PaintKit) {
     const style = getComputedStyle(button);
     const isLive = !button.disabled;
     if (!isLive) ctx.globalAlpha = 0.3;
-    const isHover = isLive && button.matches(":hover");
-    const isActive = isLive && button.matches(":active");
+    const isHover = isLive && button.matches(":hover, [data-hover]");
+    const isActive = isLive && button.matches(":active, [data-active]");
     const background = isActive
       ? kit.withAlpha(hud, 0.22)
       : isHover || button.classList.contains("is-playing")

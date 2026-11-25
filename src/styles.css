@@ -90,10 +90,12 @@ body,
   color: var(--hud);
 }
 
-/* While a panel is painted into the plot, its HTML stays on top, invisible, to take
-   clicks and keyboard focus. */
+/* While a panel is painted into the plot, its HTML stays on top, invisible, for keyboard
+   focus and screen readers. Pointer input is mapped through the screen curvature to it
+   (see panelPointer.ts), which marks the hovered button with data-hover. */
 .is-painted {
   opacity: 0;
+  pointer-events: none;
 }
 
 .player-panel {
@@ -401,7 +403,8 @@ body,
   opacity: 0.7;
 }
 
-.filters-reset:hover {
+.filters-reset:hover,
+.filters-reset[data-hover] {
   opacity: 1;
 }
 
