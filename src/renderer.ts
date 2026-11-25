@@ -948,6 +948,23 @@ export class OrbitRenderer {
     this.canvas.removeEventListener("webglcontextrestored", this.onContextRestored);
   }
 
+  /**
+   * Where a point on screen shows after the curvature, both in CSS pixels from the plot's
+   * top left: the point of the undistorted frame (and UI panels) drawn there. Mirrors the
+   * curve in FINAL_FRAGMENT.
+   */
+  sourcePoint(x: number, y: number) {
+    const { width, height } = this;
+    if (width === 0 || height === 0) return { x, y };
+    const strength = effectAmount(this.effects, "curvature") * CURVATURE_MAX;
+    const cx = (x / width) * 2 - 1;
+    const cy = (y / height) * 2 - 1;
+    return {
+      x: ((cx + cx * cy * cy * strength) * 0.5 + 0.5) * width,
+      y: ((cy + cy * cx * cx * strength) * 0.5 + 0.5) * height,
+    };
+  }
+
   setLayout(width: number, height: number) {
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
     this.width = width;

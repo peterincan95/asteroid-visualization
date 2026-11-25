@@ -4,6 +4,7 @@ import { loadOrbits, type OrbitData } from "./data";
 import { DEFAULT_EFFECTS, loadEffectsOn, NO_EFFECTS, saveEffectsOn } from "./effects";
 import { HudPainter, isPlayerAnimated, paintFilters, paintPlayer } from "./hudPainter";
 import { FilterPanel } from "./FilterPanel";
+import { PanelPointer } from "./panelPointer";
 import { filterScales, FULL_POSITIONS, toOrbitFilter, type FilterPositions } from "./filters";
 import { PanZoom } from "./panZoom";
 import { colorTable } from "./colors";
@@ -77,8 +78,13 @@ function Visualization({ data }: { data: OrbitData }) {
       new HudPainter(playerRef.current!, canvas, paintPlayer, (source, rect) => renderer.setOverlay(0, source, rect), isPlayerAnimated),
       new HudPainter(filtersRef.current!, canvas, paintFilters, (source, rect) => renderer.setOverlay(1, source, rect)),
     ];
+    // Pointer input reaches the panels where they appear, through the curvature.
+    const panelPointer = new PanelPointer(canvas, [playerRef.current!, filtersRef.current!], (x, y) =>
+      renderer.sourcePoint(x, y),
+    );
     setIsPainted(true);
     return () => {
+      panelPointer.destroy();
       for (const painter of painters) painter.destroy();
       setIsPainted(false);
       observer.disconnect();
